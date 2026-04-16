@@ -1,0 +1,493 @@
+<Window x:Class="SourceUnpack.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:SourceUnpack.App.ViewModels"
+        xmlns:converters="clr-namespace:SourceUnpack.App.Converters"
+        mc:Ignorable="d"
+        Title="SourceUnpack" Height="720" Width="1000"
+        WindowStyle="None" ResizeMode="CanResizeWithGrip" AllowsTransparency="True"
+        Background="Transparent"
+        WindowStartupLocation="CenterScreen"
+        Closing="Window_Closing"
+        AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver">
+
+    <!-- Keyboard Shortcuts -->
+    <Window.InputBindings>
+        <KeyBinding Gesture="Ctrl+O" Command="{Binding OpenBspCommand}"/>
+        <KeyBinding Gesture="Ctrl+Shift+O" Command="{Binding OpenVpkCommand}"/>
+        <KeyBinding Gesture="Ctrl+E" Command="{Binding ExtractAllCommand}"/>
+        <KeyBinding Gesture="Ctrl+Shift+E" Command="{Binding ExtractSelectedCommand}"/>
+        <KeyBinding Gesture="Ctrl+G" Command="{Binding OpenGmaCommand}"/>
+    </Window.InputBindings>
+
+    <Window.Resources>
+        <converters:EqualityConverter x:Key="EqualityConverter"/>
+    </Window.Resources>
+
+    <Window.DataContext>
+        <vm:MainViewModel/>
+    </Window.DataContext>
+
+    <!-- Main Window Border (CS 1.6 Style) -->
+    <Border Background="{StaticResource Brush_Background}"
+            BorderThickness="2" BorderBrush="{StaticResource Brush_BorderLight}"
+            Padding="2">
+        
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="26"/> <!-- Title Bar -->
+                <RowDefinition Height="*"/>    <!-- Content -->
+            </Grid.RowDefinitions>
+
+            <!-- Title Bar -->
+            <Grid Grid.Row="0" Background="{StaticResource Brush_Background}" MouseLeftButtonDown="TitleBar_MouseDown">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Title Text -->
+                <TextBlock Text="SourceUnpack" 
+                           Foreground="{StaticResource Brush_Text}" 
+                           FontFamily="{StaticResource Font_Main}" FontWeight="Bold"
+                           VerticalAlignment="Center" Margin="8,0,0,0"/>
+
+                <!-- Window Helpers -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,2,0">
+                    <Button Content="⚙" Width="20" Height="20" Padding="0" Click="SettingsButton_Click"
+                             Style="{StaticResource {x:Type Button}}" 
+                             FontFamily="Segoe UI Symbol" FontWeight="Normal" FontSize="12" Margin="0,0,2,0" ToolTip="Settings"/>
+                    <Button Content="—" Width="20" Height="20" Padding="0" Click="MinimizeButton_Click"
+                             Style="{StaticResource {x:Type Button}}" 
+                             FontFamily="Arial" FontWeight="Bold" FontSize="10" Margin="0,0,2,0" ToolTip="Minimize"/>
+                    <Button Content="🗖" Width="20" Height="20" Padding="0" Click="MaximizeButton_Click"
+                             Style="{StaticResource {x:Type Button}}" 
+                             FontFamily="Segoe UI Symbol" FontWeight="Normal" FontSize="10" Margin="0,0,2,0" ToolTip="Maximize"/>
+                    <Button Content="X" Width="20" Height="20" Padding="0" Click="CloseButton_Click"
+                             Style="{StaticResource {x:Type Button}}" 
+                             FontFamily="Arial" FontWeight="Bold" FontSize="10" ToolTip="Close"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Main Content Area -->
+            <Grid Grid.Row="1" Margin="4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/> <!-- Config -->
+                    <RowDefinition Height="*"/>    <!-- Browser -->
+                    <RowDefinition Height="180"/>  <!-- Logs -->
+                    <RowDefinition Height="Auto"/> <!-- Status -->
+                </Grid.RowDefinitions>
+
+                <!-- Config Panel (Top) -->
+                <GroupBox Header="Configuration" Grid.Row="0" Margin="0,0,0,8" Style="{StaticResource {x:Type GroupBox}}">
+                    <Grid Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="20"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <Label Grid.Column="0" Content="Game Directory:" />
+                        <TextBox Grid.Column="1" Text="{Binding GameDirectory}" />
+                        <Button Grid.Column="2" Content="..." Command="{Binding BrowseGameDirCommand}" Width="24" Margin="4,0,0,0"/>
+
+                        <Label Grid.Column="4" Content="Output Directory:" />
+                        <TextBox Grid.Column="5" Text="{Binding OutputDirectory}" IsReadOnly="True" />
+                        <Button Grid.Column="6" Content="..." Command="{Binding BrowseOutputCommand}" Width="24" Margin="4,0,0,0"/>
+
+                        <Label Grid.Row="1" Grid.Column="0" Content="Custom Assets:" Margin="0,4,0,0"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="5" Text="{Binding CustomAssetsDirectory}" Margin="0,4,0,0"/>
+                        <Button Grid.Row="1" Grid.Column="6" Content="..." Command="{Binding BrowseCustomAssetsDirCommand}" Width="24" Margin="4,4,0,0"/>
+
+                        <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="7" Orientation="Horizontal" Margin="0,8,0,0">
+                            <CheckBox Content="Extract Game Dependencies" IsChecked="{Binding ExtractGameDependencies}" Margin="0,0,16,0" Foreground="{StaticResource Brush_Text}" />
+                            <CheckBox Content="Skip Existing Files" IsChecked="{Binding SkipExistingFiles}" Margin="0,0,16,0" Foreground="{StaticResource Brush_Text}" />
+                            <CheckBox Content="Generate Missing Placeholders" IsChecked="{Binding GenerateMissingPlaceholders}" Foreground="{StaticResource Brush_Text}" />
+                        </StackPanel>
+                    </Grid>
+                </GroupBox>
+
+                <!-- Main Area (Split) -->
+                <Grid Grid.Row="1" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Actions Panel (Left) -->
+                    <GroupBox Grid.Column="0" Margin="0,0,8,0" Style="{StaticResource {x:Type GroupBox}}">
+                        <GroupBox.Header>
+                            <TextBlock Text="Actions" Foreground="{StaticResource Brush_TextHighlight}"/>
+                        </GroupBox.Header>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,4,0,0" Padding="0,0,4,0">
+                            <StackPanel>
+                                <Button Content="Open BSP..." Command="{Binding OpenBspCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="Open VPK..." Command="{Binding OpenVpkCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="Open GMA..." Command="{Binding OpenGmaCommand}" Margin="0,0,0,6" Height="24"/>
+                                
+                                <TextBlock Text="Model Format:" Foreground="{StaticResource Brush_TextHighlight}" Margin="0,4,0,2"/>
+                                <ComboBox SelectedIndex="{Binding ModelConversionFormatIndex}" Margin="0,0,0,6" Height="24" Background="{StaticResource Brush_Control}" Foreground="{StaticResource Brush_Text}">
+                                    <ComboBoxItem Content="OBJ (Static Props)"/>
+                                    <ComboBoxItem Content="FBX (Rigged Models)"/>
+                                    <ComboBoxItem Content="glTF (Universal 3D)"/>
+                                    <ComboBoxItem Content="GLB (Binary glTF)"/>
+                                </ComboBox>
+                                
+                                <TextBlock Text="Texture Format:" Foreground="{StaticResource Brush_TextHighlight}" Margin="0,4,0,2"/>
+                                <ComboBox SelectedIndex="{Binding TextureFormatIndex}" Margin="0,0,0,6" Height="24" Background="{StaticResource Brush_Control}" Foreground="{StaticResource Brush_Text}">
+                                    <ComboBoxItem Content="PNG (Lossless)"/>
+                                    <ComboBoxItem Content="JPG (Smaller Size)"/>
+                                </ComboBox>
+                                
+                                <Button Content="Extract All" Command="{Binding ExtractAllCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="Extract Selected" Command="{Binding ExtractSelectedCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Separator Margin="0,4,0,4" Background="{StaticResource Brush_BorderDark}"/>
+                                <TextBlock Text="Quick Convert" Foreground="{StaticResource Brush_TextHighlight}" Margin="0,0,0,4"/>
+                                <Button Content="MDL → OBJ" Command="{Binding ConvertMdlCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="VTF → PNG" Command="{Binding ConvertVtfCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="BSP → VMF" Command="{Binding ConvertBspToVmfCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Separator Margin="0,4,0,4" Background="{StaticResource Brush_BorderDark}"/>
+                                <Button Content="Clear Logs" Command="{Binding ClearLogCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="About" Command="{Binding ShowAboutCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Separator Margin="0,4,0,4" Background="{StaticResource Brush_BorderDark}"/>
+                                <TextBlock Text="Export Presets" Foreground="{StaticResource Brush_TextHighlight}" Margin="0,0,0,4"/>
+                                <Button Content="💾 Save Preset" Command="{Binding SavePresetCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="📂 Load Preset" Command="{Binding LoadPresetCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Separator Margin="0,4,0,4" Background="{StaticResource Brush_BorderDark}"/>
+                                <TextBlock Text="Batch Queue" Foreground="{StaticResource Brush_TextHighlight}" Margin="0,0,0,4"/>
+                                <Button Content="＋ Add to Batch" Command="{Binding AddToBatchCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="▶ Run Batch" Command="{Binding RunBatchCommand}" Margin="0,0,0,6" Height="24"/>
+                                <Button Content="✕ Clear Queue" Command="{Binding ClearBatchCommand}" Margin="0,0,0,6" Height="24"/>
+                                <TextBlock Text="{Binding BatchQueueText}" Foreground="{StaticResource Brush_TextDim}" FontSize="10" Margin="0,2,0,4"/>
+                                
+                                <!-- Map Info -->
+                                <TextBlock Text="{Binding InfoLabel}" FontWeight="Bold" Margin="0,8,0,4" Foreground="{StaticResource Brush_TextHighlight}"/>
+                                <Grid Margin="0,0,0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding InfoField1Label}" Foreground="{StaticResource Brush_TextDim}"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding InfoField1Value}" TextTrimming="CharacterEllipsis"/>
+                                    
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding InfoField2Label}" Foreground="{StaticResource Brush_TextDim}"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding InfoField2Value}" TextTrimming="CharacterEllipsis"/>
+                                    
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="{Binding InfoField3Label}" Foreground="{StaticResource Brush_TextDim}"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding InfoField3Value}" TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </GroupBox>
+
+                    <!-- Asset Browser (Right) -->
+                    <!-- Right Panel: Tabs -->
+                    <TabControl Grid.Column="1" Margin="0">
+                        <TabItem Header="Asset Browser">
+                            <Grid Margin="0,4,0,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*"/>    <!-- TreeView -->
+                                    <RowDefinition Height="Auto"/> <!-- Preview -->
+                                </Grid.RowDefinitions>
+
+                                <!-- TreeView Container -->
+                                <Grid Grid.Row="0">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                    </Grid.RowDefinitions>
+                                    <DockPanel Grid.Row="0" Margin="2,4,2,2">
+                                        <TextBlock Text="Files" Foreground="{StaticResource Brush_TextDim}" FontSize="10" VerticalAlignment="Center"/>
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                            <Button Content="Check All" Command="{Binding CheckAllCommand}" 
+                                                    FontSize="9" Padding="10,1" Height="18" MinWidth="60" Margin="0,0,4,0"
+                                                    Focusable="False"/>
+                                            <Button Content="Uncheck All" Command="{Binding UncheckAllCommand}" 
+                                                    FontSize="9" Padding="10,1" Height="18" MinWidth="70"
+                                                    Focusable="False"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                    <!-- Search Bar -->
+                                    <TextBox Grid.Row="1" Text="{Binding SearchFilter, UpdateSourceTrigger=PropertyChanged}" 
+                                             Margin="2,0,2,2" Height="20" FontSize="10"
+                                             Tag="Search assets..."
+                                             Style="{StaticResource {x:Type TextBox}}"/>
+                                    <Border Grid.Row="2" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" Background="{StaticResource Brush_Control}">
+                                         <Grid>
+                                             <Border BorderThickness="1" BorderBrush="{StaticResource Brush_BorderLight}"/> 
+                                             
+                                             <TreeView ItemsSource="{Binding FilteredAssetTree}" Background="Transparent" BorderThickness="0" Margin="1"
+                                                       VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling"
+                                                       SelectedItemChanged="TreeView_SelectedItemChanged">
+                                                <TreeView.ItemContainerStyle>
+                                                    <Style TargetType="{x:Type TreeViewItem}" BasedOn="{StaticResource {x:Type TreeViewItem}}">
+                                                        <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                                                        <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+                                                    </Style>
+                                                </TreeView.ItemContainerStyle>
+                                                <TreeView.ItemTemplate>
+                                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <StackPanel.ContextMenu>
+                                                                <ContextMenu>
+                                                                    <MenuItem Header="Copy Path" Command="{Binding CopyPathCommand}"/>
+                                                                    <Separator/>
+                                                                    <MenuItem Header="Extract File" Command="{Binding ExtractNodeCommand}"/>
+                                                                    <MenuItem Header="Quick Convert MDL" Command="{Binding ConvertNodeMdlCommand}"/>
+                                                                    <MenuItem Header="Quick Convert VTF" Command="{Binding ConvertNodeVtfCommand}"/>
+                                                                </ContextMenu>
+                                                            </StackPanel.ContextMenu>
+                                                            <CheckBox IsChecked="{Binding IsChecked}" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                                            <TextBlock Text="{Binding Icon}" Margin="0,0,4,0" Foreground="{StaticResource Brush_TextHighlight}" FontFamily="Segoe UI Emoji"/> 
+                                                            <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
+                                                        </StackPanel>
+                                                    </HierarchicalDataTemplate>
+                                                </TreeView.ItemTemplate>
+                                            </TreeView>
+                                         </Grid>
+                                    </Border>
+                                </Grid>
+
+                                <!-- GridSplitter -->
+                                <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch" VerticalAlignment="Top" 
+                                              Background="Transparent" Cursor="SizeNS" Margin="0,0,0,0"/>
+
+                                <!-- Asset Preview Panel -->
+                                <Border Grid.Row="1" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" 
+                                        Background="{StaticResource Brush_Control}" Margin="0,4,0,0" MinHeight="100">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="*"/>
+                                        </Grid.RowDefinitions>
+
+                                        <!-- Preview Header Bar -->
+                                        <DockPanel Grid.Row="0" Margin="4,2,4,0">
+                                            <TextBlock Text="{Binding PreviewText}" Foreground="{StaticResource Brush_TextHighlight}" 
+                                                       FontSize="10" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+
+                                            <!-- Render Mode Toggle (only visible for models) -->
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right"
+                                                        Visibility="{Binding PreviewType, Converter={StaticResource EqualityConverter}, ConverterParameter=model}">
+                                                <Button Content="◼ Solid" Command="{Binding ToggleRenderModeCommand}" CommandParameter="solid"
+                                                        FontSize="9" Padding="4,1" Height="16" Margin="0,0,2,0"/>
+                                                <Button Content="🖼 Textured" Command="{Binding ToggleRenderModeCommand}" CommandParameter="textured"
+                                                        FontSize="9" Padding="4,1" Height="16"/>
+                                            </StackPanel>
+                                        </DockPanel>
+
+                                        <!-- Preview Content -->
+                                        <Grid Grid.Row="1" Margin="4,2,4,4">
+                                            <!-- Image Preview -->
+                                            <Image Source="{Binding PreviewImage}" Stretch="Uniform"
+                                                   Visibility="{Binding PreviewType, Converter={StaticResource EqualityConverter}, ConverterParameter=image}" />
+
+                                            <!-- Audio Preview -->
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                        Visibility="{Binding PreviewType, Converter={StaticResource EqualityConverter}, ConverterParameter=audio}">
+                                                <Button Content="▶ Play" Command="{Binding PlayAudioCommand}" Width="80" Height="24" Margin="0,0,4,0"/>
+                                                <Button Content="⏹ Stop" Command="{Binding StopAudioCommand}" Width="80" Height="24"/>
+                                            </StackPanel>
+
+                                            <!-- 3D Model Preview (interactive) -->
+                                            <Border Background="Black"
+                                                    Visibility="{Binding PreviewType, Converter={StaticResource EqualityConverter}, ConverterParameter=model}">
+                                                <Viewport3D x:Name="ModelViewport"
+                                                            MouseLeftButtonDown="ModelViewport_MouseDown" 
+                                                            MouseMove="ModelViewport_MouseMove"
+                                                            MouseLeftButtonUp="ModelViewport_MouseUp"
+                                                            MouseWheel="ModelViewport_MouseWheel">
+                                                    <Viewport3D.Camera>
+                                                        <PerspectiveCamera x:Name="ModelCamera" Position="0,40,80" LookDirection="0,-20,-80" UpDirection="0,1,0" FieldOfView="60" />
+                                                    </Viewport3D.Camera>
+                                                    <ModelVisual3D Content="{Binding PreviewModel3D}" />
+                                                </Viewport3D>
+                                            </Border>
+
+                                            <!-- Text/Info Preview (fallback) -->
+                                            <TextBlock Text="{Binding PreviewText}" Foreground="{StaticResource Brush_Text}" 
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"
+                                                       Visibility="{Binding PreviewType, Converter={StaticResource EqualityConverter}, ConverterParameter=none}"/>
+
+                                            <!-- VMT Material Preview -->
+                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                          Visibility="{Binding PreviewType, Converter={StaticResource EqualityConverter}, ConverterParameter=vmt}">
+                                                <TextBlock Text="{Binding PreviewText}" Foreground="{StaticResource Brush_Text}" 
+                                                           FontFamily="{StaticResource Font_Mono}" FontSize="10" TextWrapping="Wrap" Margin="2"/>
+                                            </ScrollViewer>
+                                        </Grid>
+                                    </Grid>
+                                </Border>
+                            </Grid>
+                        </TabItem>
+
+                        <TabItem Header="SteamCMD">
+                            <Grid Margin="0,4,0,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/> <!-- Options -->
+                                    <RowDefinition Height="*"/>    <!-- Console -->
+                                    <RowDefinition Height="Auto"/> <!-- Input -->
+                                </Grid.RowDefinitions>
+
+                                <!-- Options Expander -->
+                                <Expander Grid.Row="0" Header="SteamCMD Options" Margin="0,0,0,4" IsExpanded="True" Foreground="{StaticResource Brush_TextHighlight}"
+                                          Style="{StaticResource {x:Type Expander}}"> <!-- Use explicit style if needed, but Resources should cover it -->
+                                    <Border Background="{StaticResource Brush_Control}" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderLight}" Padding="4">
+                                        <StackPanel>
+                                            
+                                            <!-- SteamCMD Path COnfig -->
+                                            <TextBlock Text="SteamCMD Executable:" FontWeight="Bold" Margin="0,0,0,2" Foreground="{StaticResource Brush_Text}"/>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBox Text="{Binding SteamCmdPath}" VerticalAlignment="Center" Height="22"/>
+                                                <Button Grid.Column="1" Content="..." Command="{Binding BrowseSteamCmdPathCommand}" Width="24" Height="22" Margin="4,0,0,0"/>
+                                            </Grid>
+                                            
+                                            <TextBlock Text="Select Game (Auto-fill download command):" FontWeight="Bold" Margin="0,0,0,4" Foreground="{StaticResource Brush_Text}"/>
+                                            
+                                            <!-- Game Selection ListBox -->
+                                            <ListBox ItemsSource="{Binding SteamGames}" SelectedItem="{Binding SelectedSteamGame}" Height="100" 
+                                                     BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" 
+                                                     Background="{StaticResource Brush_Background}" Foreground="{StaticResource Brush_Text}"
+                                                     Padding="2">
+                                                <ListBox.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Foreground="{StaticResource Brush_Text}"/>
+                                                            <TextBlock Text="{Binding AppId, StringFormat=' ({0})'}" Foreground="{StaticResource Brush_TextDim}" Margin="4,0,0,0"/>
+                                                        </StackPanel>
+                                                    </DataTemplate>
+                                                </ListBox.ItemTemplate>
+                                                <ListBox.ItemContainerStyle>
+                                                    <Style TargetType="{x:Type ListBoxItem}">
+                                                        <Setter Property="Template">
+                                                            <Setter.Value>
+                                                                <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                                                                    <Border x:Name="Bd" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="true">
+                                                                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                                                                    </Border>
+                                                                    <ControlTemplate.Triggers>
+                                                                        <Trigger Property="IsSelected" Value="true">
+                                                                            <Setter Property="Background" TargetName="Bd" Value="{StaticResource Brush_Selection}"/>
+                                                                            <Setter Property="TextElement.Foreground" TargetName="Bd" Value="{StaticResource Brush_TextHighlight}"/>
+                                                                        </Trigger>
+                                                                        <Trigger Property="IsMouseOver" Value="true">
+                                                                            <Setter Property="Background" TargetName="Bd" Value="#333"/>
+                                                                        </Trigger>
+                                                                    </ControlTemplate.Triggers>
+                                                                </ControlTemplate>
+                                                            </Setter.Value>
+                                                        </Setter>
+                                                    </Style>
+                                                </ListBox.ItemContainerStyle>
+                                            </ListBox>
+                                        </StackPanel>
+                                    </Border>
+                                </Expander>
+
+                                <!-- Console Output -->
+                                <Border Grid.Row="1" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" Background="Black" Margin="0,0,0,4">
+                                    <TextBox Text="{Binding SteamCmdLog}" IsReadOnly="True" 
+                                             Background="Black" Foreground="#00FF00"
+                                             VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"
+                                             FontFamily="{StaticResource Font_Mono}" FontSize="12" 
+                                             Padding="4" BorderThickness="0"/>
+                                </Border>
+
+                                <!-- Input Area -->
+                                <Grid Grid.Row="2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/> 
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBox Grid.Column="0" Text="{Binding SteamCmdInput, UpdateSourceTrigger=PropertyChanged}" Height="24" VerticalContentAlignment="Center">
+                                        <TextBox.InputBindings>
+                                            <KeyBinding Key="Return" Command="{Binding SendSteamCmdCommand}"/>
+                                        </TextBox.InputBindings>
+                                    </TextBox>
+                                    
+                                    <Button Grid.Column="1" Content="Send" Command="{Binding SendSteamCmdCommand}" Width="50" Height="24" Margin="4,0,0,0"/>
+                                    <Button Grid.Column="2" Content="Start" Command="{Binding StartSteamCmdCommand}" Width="50" Height="24" Margin="4,0,0,0"/>
+                                    <Button Grid.Column="3" Content="Open Folder" Command="{Binding OpenSteamCmdContentCommand}" Width="80" Height="24" Margin="4,0,0,0"/>
+                                </Grid>
+                            </Grid>
+                        </TabItem>
+                    </TabControl>
+                </Grid>
+
+                <!-- Logs (Bottom) -->
+                <Grid Grid.Row="2" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="8"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <GroupBox Header="Extraction Log" Grid.Column="0" Style="{StaticResource {x:Type GroupBox}}">
+                        <TextBox Text="{Binding LogText}" IsReadOnly="True" 
+                                 Background="Black" Foreground="#00FF00"
+                                 VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"
+                                 FontFamily="{StaticResource Font_Mono}" FontSize="10" Margin="0,4,0,0"/>
+                    </GroupBox>
+
+                    <GroupBox Header="System / VPK Log" Grid.Column="2" Style="{StaticResource {x:Type GroupBox}}">
+                        <TextBox Text="{Binding SystemLogText}" IsReadOnly="True" 
+                                 Background="Black" Foreground="#00FF00"
+                                 VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"
+                                 FontFamily="{StaticResource Font_Mono}" FontSize="10" Margin="0,4,0,0"/>
+                    </GroupBox>
+                </Grid>
+
+                <!-- Status Bar -->
+                <Grid Grid.Row="3">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="150"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <!-- Status Text -->
+                    <Border Grid.Column="0" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" Background="{StaticResource Brush_Control}" Margin="0,0,4,0" Padding="4,2">
+                         <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" Foreground="{StaticResource Brush_TextHighlight}"/>
+                    </Border>
+
+                    <!-- Asset Count -->
+                    <Border Grid.Column="1" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" Background="{StaticResource Brush_Control}" Margin="0,0,4,0" Padding="4,2">
+                        <TextBlock Text="{Binding AssetCountText}" VerticalAlignment="Center" Foreground="{StaticResource Brush_TextDim}" FontSize="10"/>
+                    </Border>
+                    
+                    <Border Grid.Column="2" BorderThickness="1" BorderBrush="{StaticResource Brush_BorderDark}" Background="{StaticResource Brush_Control}" Margin="0,0,4,0" Padding="4,2">
+                        <TextBlock Text="{Binding ProgressText}" VerticalAlignment="Center"/>
+                    </Border>
+
+                    <ProgressBar Grid.Column="3" Value="{Binding ProgressValue}" Maximum="100" Height="16"/>
+                </Grid>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
