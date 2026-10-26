@@ -8,8 +8,6 @@
 
 **SourceUnpack** allows you to open any Source Engine map file (`.bsp`) or game archive (`.vpk`) and extract its contents—textures, models, sounds, and more—converting them into standard formats usable in other engines (Unity, Unreal, Blender, Godot).
 
-Built with **.NET 8** and **WPF**, designed to look like the classic GoldSrc tools you know and love.
-
 ##  Features
 
 - **SteamCMD Support**: SteamCMD comes integrated with SourceUnpack, select .exe directory in order to get BSP and GMA files from workshop.
