@@ -113,7 +113,8 @@
                         <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="7" Orientation="Horizontal" Margin="0,8,0,0">
                             <CheckBox Content="Extract Game Dependencies" IsChecked="{Binding ExtractGameDependencies}" Margin="0,0,16,0" Foreground="{StaticResource Brush_Text}" />
                             <CheckBox Content="Skip Existing Files" IsChecked="{Binding SkipExistingFiles}" Margin="0,0,16,0" Foreground="{StaticResource Brush_Text}" />
-                            <CheckBox Content="Generate Missing Placeholders" IsChecked="{Binding GenerateMissingPlaceholders}" Foreground="{StaticResource Brush_Text}" />
+                            <CheckBox Content="Generate Missing Placeholders" IsChecked="{Binding GenerateMissingPlaceholders}" Margin="0,0,16,0" Foreground="{StaticResource Brush_Text}" />
+                            <CheckBox Content="Extract Original Assets (.vtf, .mdl, .nav)" IsChecked="{Binding ExtractOriginalAssets}" Foreground="{StaticResource Brush_TextHighlight}" ToolTip="Extract raw Source engine assets (.vtf, .mdl, .nav, etc.) without converting to .obj or .png" />
                         </StackPanel>
                     </Grid>
                 </GroupBox>
@@ -142,12 +143,14 @@
                                     <ComboBoxItem Content="FBX (Rigged Models)"/>
                                     <ComboBoxItem Content="glTF (Universal 3D)"/>
                                     <ComboBoxItem Content="GLB (Binary glTF)"/>
+                                    <ComboBoxItem Content="Original (.mdl + companions)"/>
                                 </ComboBox>
                                 
                                 <TextBlock Text="Texture Format:" Foreground="{StaticResource Brush_TextHighlight}" Margin="0,4,0,2"/>
                                 <ComboBox SelectedIndex="{Binding TextureFormatIndex}" Margin="0,0,0,6" Height="24" Background="{StaticResource Brush_Control}" Foreground="{StaticResource Brush_Text}">
                                     <ComboBoxItem Content="PNG (Lossless)"/>
                                     <ComboBoxItem Content="JPG (Smaller Size)"/>
+                                    <ComboBoxItem Content="Original (.vtf)"/>
                                 </ComboBox>
                                 
                                 <Button Content="Extract All" Command="{Binding ExtractAllCommand}" Margin="0,0,0,6" Height="24"/>
@@ -251,6 +254,7 @@
                                                                     <MenuItem Header="Copy Path" Command="{Binding CopyPathCommand}"/>
                                                                     <Separator/>
                                                                     <MenuItem Header="Extract File" Command="{Binding ExtractNodeCommand}"/>
+                                                                    <MenuItem Header="Extract Original (.mdl / .vtf / .nav)" Command="{Binding ExtractNodeOriginalCommand}"/>
                                                                     <MenuItem Header="Quick Convert MDL" Command="{Binding ConvertNodeMdlCommand}"/>
                                                                     <MenuItem Header="Quick Convert VTF" Command="{Binding ConvertNodeVtfCommand}"/>
                                                                 </ContextMenu>

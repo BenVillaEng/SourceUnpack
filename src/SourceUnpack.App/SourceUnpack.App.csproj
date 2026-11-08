@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\SourceUnpack.Core\SourceUnpack.Core.csproj" />
@@ -9,7 +9,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\..\steamcmd.exe">
+    <Content Include="..\..\steamcmd.exe" Condition="Exists('..\..\steamcmd.exe')">
       <Link>steamcmd\steamcmd.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

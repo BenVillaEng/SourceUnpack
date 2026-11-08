@@ -141,6 +141,14 @@ public class AssetTreeNode : INotifyPropertyChanged
         }
     });
 
+    public ICommand ExtractNodeOriginalCommand => new RelayCommand(async _ =>
+    {
+        if (ViewModel != null && Asset != null)
+        {
+            await ViewModel.ExtractSingleNodeOriginalAsync(this);
+        }
+    });
+
     public ICommand ConvertNodeMdlCommand => new RelayCommand(async _ =>
     {
         if (ViewModel != null && Asset != null)
@@ -235,6 +243,9 @@ public class MainViewModel : INotifyPropertyChanged
     private bool _preserveDirectoryStructure = true;
     public bool PreserveDirectoryStructure { get => _preserveDirectoryStructure; set { _preserveDirectoryStructure = value; OnPropertyChanged(); SaveSettings(); } }
     
+    private bool _extractOriginalAssets = false;
+    public bool ExtractOriginalAssets { get => _extractOriginalAssets; set { _extractOriginalAssets = value; OnPropertyChanged(); SaveSettings(); } }
+
     private int _modelConversionFormatIndex;
     public int ModelConversionFormatIndex { get => _modelConversionFormatIndex; set { _modelConversionFormatIndex = value; OnPropertyChanged(); SaveSettings(); } }
     
@@ -521,9 +532,13 @@ public class MainViewModel : INotifyPropertyChanged
 
             // Discover assets
             StatusText = "Discovering assets...";
-            _allAssets = AssetDiscovery.DiscoverFromBsp(_currentBsp);
+            _allAssets = AssetDiscovery.DiscoverFromBsp(_currentBsp, dialog.FileName);
             var stats = AssetDiscovery.GetStats(_allAssets);
             AppendLog($"Found: {stats.textures} textures, {stats.models} models, {stats.sounds} sounds, {stats.skyboxes} skybox faces, {stats.other} other");
+
+            var navAsset = _allAssets.FirstOrDefault(a => a.Type == AssetType.NavMesh);
+            if (navAsset != null)
+                AppendLog($"[NavMesh] Found navigation mesh: {navAsset.FileName} ({navAsset.Source})");
 
             // Build tree
             BuildAssetTree();
@@ -557,6 +572,7 @@ public class MainViewModel : INotifyPropertyChanged
                 AssetType.Model => "🗃",
                 AssetType.Sound => "🔊",
                 AssetType.Skybox => "🌅",
+                AssetType.NavMesh => "🧭",
                 _ => "📄"
             };
 
@@ -649,6 +665,74 @@ public class MainViewModel : INotifyPropertyChanged
         await RunExtraction(selected);
     }
 
+    public async Task ExtractSingleNodeOriginalAsync(AssetTreeNode node)
+    {
+        if (node.Asset == null) return;
+        try
+        {
+            IsBusy = true;
+            StatusText = $"Extracting original {node.Asset.FileName}...";
+            AppendLog($"Extracting Original: {node.Asset.FullPath}");
+
+            var options = new ConversionOptions
+            {
+                OutputDirectory = OutputDirectory,
+                PreserveDirectoryStructure = PreserveDirectoryStructure,
+                ExportSeparateMaterialMaps = false,
+                ExtractOriginalAssets = true,
+                SkipExistingFiles = SkipExistingFiles,
+                KeepMdlFile = true,
+                ModelExportFormat = ModelFormat.Original,
+                TextureOutputFormat = TextureFormat.Original
+            };
+
+            var pipeline = new ExtractionPipeline(options);
+            pipeline.LogMessage += (_, msg) => System.Windows.Application.Current?.Dispatcher.Invoke(() => AppendLog(msg));
+            pipeline.SystemMessage += (_, msg) => System.Windows.Application.Current?.Dispatcher.Invoke(() => AppendSystemLog(msg));
+
+            // Load sources
+            if (!string.IsNullOrEmpty(BspFilePath)) pipeline.LoadBsp(BspFilePath);
+            else if (!string.IsNullOrEmpty(_currentGmaPath))
+            {
+                pipeline.LoadGma(_currentGmaPath);
+                if (_currentGma != null)
+                {
+                    var bspEntry = _currentGma.Entries.FirstOrDefault(e => e.Path.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase));
+                    if (bspEntry != null)
+                    {
+                        byte[]? bspData = _currentGma.ExtractEntry(bspEntry);
+                        if (bspData != null) pipeline.LoadBspData(bspData, bspEntry.Path);
+                    }
+                }
+            }
+            else if (!string.IsNullOrEmpty(_currentVpkPath)) pipeline.LoadVpk(_currentVpkPath);
+
+            // Custom assets
+            if (!string.IsNullOrWhiteSpace(CustomAssetsDirectory))
+            {
+                var paths = CustomAssetsDirectory.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var p in paths)
+                {
+                    string t = p.Trim();
+                    if (System.IO.Directory.Exists(t)) pipeline.LoadDirectory(t);
+                    else if (System.IO.File.Exists(t) && t.EndsWith(".gma", StringComparison.OrdinalIgnoreCase)) pipeline.LoadGma(t);
+                }
+            }
+
+            await pipeline.ExtractAsync(new List<AssetInfo> { node.Asset });
+            StatusText = $"Extracted original {node.Asset.FileName}";
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"ERROR: {ex.Message}");
+            StatusText = "Original extraction failed";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     public async Task ConvertSingleMdlNodeAsync(AssetTreeNode node)
     {
         if (node.Asset == null || !node.Asset.FileName.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase)) return;
@@ -664,12 +748,6 @@ public class MainViewModel : INotifyPropertyChanged
         if (node.Asset == null || !node.Asset.FileName.EndsWith(".vtf", StringComparison.OrdinalIgnoreCase)) return;
         
         var selected = new List<AssetInfo> { node.Asset };
-        
-        // Temporarily override ModelFormat? No, RunExtraction handles VTF to PNG automatically if requested.
-        // Actually, ExtractModel handles models, but for VTF to PNG we need a specific flag or we just let pipeline extract it.
-        // The standard RunExtraction pipeline currently extracts VTF raw. 
-        // Let's implement dynamic single-file conversion utilizing the existing ConvertMdlDirect and ConvertVtfDirect logic, 
-        // BUT they prompt for a file. We'll add overloaded methods that take byte data directly.
         await ConvertNodeDirectAsync(node);
     }
 
@@ -688,6 +766,7 @@ public class MainViewModel : INotifyPropertyChanged
                 OutputDirectory = OutputDirectory,
                 PreserveDirectoryStructure = PreserveDirectoryStructure,
                 ExportSeparateMaterialMaps = true,
+                ExtractOriginalAssets = ExtractOriginalAssets,
                 ModelExportFormat = (ModelFormat)ModelConversionFormatIndex,
                 KeepMdlFile = KeepMdlFile,
                 TextureOutputFormat = (TextureFormat)TextureFormatIndex
@@ -695,10 +774,23 @@ public class MainViewModel : INotifyPropertyChanged
             
             var pipeline = new ExtractionPipeline(options);
             pipeline.LogMessage += (_, msg) => System.Windows.Application.Current?.Dispatcher.Invoke(() => AppendLog(msg));
+            pipeline.SystemMessage += (_, msg) => System.Windows.Application.Current?.Dispatcher.Invoke(() => AppendSystemLog(msg));
             
             // Load source
             if (!string.IsNullOrEmpty(BspFilePath)) pipeline.LoadBsp(BspFilePath);
-            else if (!string.IsNullOrEmpty(_currentGmaPath)) pipeline.LoadGma(_currentGmaPath);
+            else if (!string.IsNullOrEmpty(_currentGmaPath))
+            {
+                pipeline.LoadGma(_currentGmaPath);
+                if (_currentGma != null)
+                {
+                    var bspEntry = _currentGma.Entries.FirstOrDefault(e => e.Path.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase));
+                    if (bspEntry != null)
+                    {
+                        byte[]? bspData = _currentGma.ExtractEntry(bspEntry);
+                        if (bspData != null) pipeline.LoadBspData(bspData, bspEntry.Path);
+                    }
+                }
+            }
             else if (!string.IsNullOrEmpty(_currentVpkPath)) pipeline.LoadVpk(_currentVpkPath);
             
             // For custom assets
@@ -715,12 +807,6 @@ public class MainViewModel : INotifyPropertyChanged
             
             // Run on a single item. We just need to filter the assets list to one item and process it.
             var singleList = new List<AssetInfo> { node.Asset };
-            
-            if (node.Asset.Type == AssetType.Texture)
-            {
-                // Quick Convert automatically uses the selected TextureOutputFormat
-                // via the standard ExtractionPipeline since it supports VTF conversion.
-            }
             
             await pipeline.ExtractAsync(singleList);
             StatusText = $"Quick Converted {node.Asset.FileName}";
@@ -754,6 +840,7 @@ public class MainViewModel : INotifyPropertyChanged
                 GenerateMissingPlaceholders = GenerateMissingPlaceholders,
                 SkipExistingFiles = SkipExistingFiles,
                 KeepMdlFile = KeepMdlFile,
+                ExtractOriginalAssets = ExtractOriginalAssets,
                 ModelExportFormat = (ModelFormat)ModelConversionFormatIndex,
                 TextureOutputFormat = (TextureFormat)TextureFormatIndex
             };
@@ -800,6 +887,19 @@ public class MainViewModel : INotifyPropertyChanged
             {
                 // GMA Mode
                 pipeline.LoadGma(_currentGmaPath);
+                if (_currentGma != null)
+                {
+                    var bspEntry = _currentGma.Entries.FirstOrDefault(e => e.Path.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase));
+                    if (bspEntry != null)
+                    {
+                        byte[]? bspData = _currentGma.ExtractEntry(bspEntry);
+                        if (bspData != null)
+                        {
+                            pipeline.LoadBspData(bspData, bspEntry.Path);
+                            AppendLog($"[Workshop GMA] Embedded map '{bspEntry.Path}' loaded into extraction pipeline.");
+                        }
+                    }
+                }
             }
             else if (!string.IsNullOrEmpty(_currentVpkPath))
             {
@@ -819,16 +919,17 @@ public class MainViewModel : INotifyPropertyChanged
                 }
             }
 
-            // Load Game VPKs if configured (Background Task)
+            // Load Game VPKs & GMAs if configured (Background Task)
             // But skip if we're explicitly extracting a direct standalone VPK (we don't need dependencies for it)
             if (options.ExtractGameDependencies && string.IsNullOrEmpty(_currentVpkPath))
             {
                 await Task.Run(() =>
                 {
-                    StatusText = "Mounting Game VPKs...";
+                    StatusText = "Mounting Game VPKs & Workshop Dependencies...";
                     try
                     {
-                        var vpkList = FindGameVpks(!string.IsNullOrEmpty(BspFilePath) ? BspFilePath : _currentVpkPath);
+                        string? activeFile = !string.IsNullOrEmpty(BspFilePath) ? BspFilePath : (!string.IsNullOrEmpty(_currentGmaPath) ? _currentGmaPath : _currentVpkPath);
+                        var vpkList = FindGameVpks(activeFile);
 
                         if (vpkList.Count > 100) 
                         {
@@ -842,10 +943,28 @@ public class MainViewModel : INotifyPropertyChanged
                             pipeline.LoadVpk(vpk);
                         }
                         AppendSystemLog($"Mounted {vpkList.Count} external VPKs.");
+
+                        // Mount sibling & workshop GMAs
+                        var gmaList = FindGameGmas(activeFile);
+                        int mountedGmas = 0;
+                        foreach (var gmaFile in gmaList.Take(50))
+                        {
+                            if (string.Equals(gmaFile, _currentGmaPath, StringComparison.OrdinalIgnoreCase)) continue;
+                            try
+                            {
+                                pipeline.LoadGma(gmaFile);
+                                mountedGmas++;
+                            }
+                            catch { }
+                        }
+                        if (mountedGmas > 0)
+                        {
+                            AppendSystemLog($"Mounted {mountedGmas} external Workshop/Addon GMAs.");
+                        }
                     }
                     catch (Exception ex)
                     {
-                         AppendSystemLog($"ERROR scanning VPKs: {ex.Message}");
+                         AppendSystemLog($"ERROR scanning dependencies: {ex.Message}");
                     }
                 });
             }
@@ -1059,12 +1178,24 @@ public class MainViewModel : INotifyPropertyChanged
 
             AppendLog($"Addon: {_currentGma.AddonName} | Author: {_currentGma.AddonAuthor} | Files: {_currentGma.Entries.Count}");
 
+            // Check if this GMA contains an embedded map (.bsp)
+            var bspEntry = _currentGma.Entries.FirstOrDefault(e => e.Path.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase));
+            if (bspEntry != null)
+            {
+                InfoLabel = "Workshop Map (GMA)";
+                AppendLog($"[Workshop Map] GMA contains embedded map: {bspEntry.Path}");
+            }
+
             // Discover assets
             StatusText = "Discovering assets...";
             _allAssets = AssetDiscovery.DiscoverFromGma(_currentGma);
             AssetCountText = $"{_allAssets.Count} assets";
             var stats = AssetDiscovery.GetStats(_allAssets);
             AppendLog($"Found: {stats.textures} textures, {stats.models} models, {stats.sounds} sounds, {stats.other} other");
+
+            var navAsset = _allAssets.FirstOrDefault(a => a.Type == AssetType.NavMesh);
+            if (navAsset != null)
+                AppendLog($"[NavMesh] Found navigation mesh: {navAsset.FileName} ({navAsset.Source})");
 
             // Build tree
             BuildAssetTree();
@@ -1576,8 +1707,8 @@ public class MainViewModel : INotifyPropertyChanged
             string settingsDir = System.IO.Path.Combine(appData, "SourceUnpack");
             string settingsFile = System.IO.Path.Combine(settingsDir, "settings.txt");
             System.IO.Directory.CreateDirectory(settingsDir);
-            // Simple format: GameDir|OutputDir|SteamCmdPath|ExtractGameDependencies|GenerateMissingPlaceholders|SkipExistingFiles|ModelConversionFormatIndex|KeepMdl|PreserveDir|TextureFormatIndex
-            string data = $"{GameDirectory}|{OutputDirectory}|{SteamCmdPath}|{ExtractGameDependencies}|{GenerateMissingPlaceholders}|{SkipExistingFiles}|{ModelConversionFormatIndex}|{KeepMdlFile}|{PreserveDirectoryStructure}|{TextureFormatIndex}";
+            // Format: GameDir|OutputDir|SteamCmdPath|ExtractGameDependencies|GenerateMissingPlaceholders|SkipExistingFiles|ModelConversionFormatIndex|KeepMdl|PreserveDir|TextureFormatIndex|ExtractOriginalAssets
+            string data = $"{GameDirectory}|{OutputDirectory}|{SteamCmdPath}|{ExtractGameDependencies}|{GenerateMissingPlaceholders}|{SkipExistingFiles}|{ModelConversionFormatIndex}|{KeepMdlFile}|{PreserveDirectoryStructure}|{TextureFormatIndex}|{ExtractOriginalAssets}";
             System.IO.File.WriteAllText(settingsFile, data);
         }
         catch { }
@@ -1603,62 +1734,153 @@ public class MainViewModel : INotifyPropertyChanged
                 if (parts.Length >= 8 && bool.TryParse(parts[7], out bool keep)) KeepMdlFile = keep;
                 if (parts.Length >= 9 && bool.TryParse(parts[8], out bool pds)) PreserveDirectoryStructure = pds;
                 if (parts.Length >= 10 && int.TryParse(parts[9], out int tfi)) TextureFormatIndex = tfi;
+                if (parts.Length >= 11 && bool.TryParse(parts[10], out bool eoa)) ExtractOriginalAssets = eoa;
             }
         }
         catch { }
     }
 
     // ── Utility ────────────────────────────────────────────────────
+
+    private List<string> GetSteamLibraryRoots(string? currentFilePath)
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void TryAddRoot(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            try
+            {
+                if (Directory.Exists(path))
+                    roots.Add(Path.GetFullPath(path));
+            }
+            catch { }
+        }
+
+        // 1. Ancestors of currentFilePath or GameDirectory looking for "steamapps"
+        string?[] startDirs = [
+            !string.IsNullOrEmpty(currentFilePath) ? Path.GetDirectoryName(currentFilePath) : null,
+            GameDirectory
+        ];
+
+        foreach (var startDir in startDirs)
+        {
+            if (string.IsNullOrEmpty(startDir)) continue;
+            string? cur = startDir;
+            while (!string.IsNullOrEmpty(cur))
+            {
+                if (Path.GetFileName(cur).Equals("steamapps", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parent = Directory.GetParent(cur)?.FullName;
+                    if (!string.IsNullOrEmpty(parent)) TryAddRoot(parent);
+                    break;
+                }
+                cur = Directory.GetParent(cur)?.FullName;
+            }
+        }
+
+        // 2. Common Steam installation paths on Windows
+        string[] standardPaths = [
+            @"C:\Program Files (x86)\Steam",
+            @"C:\Program Files\Steam",
+            @"D:\Steam",
+            @"D:\SteamLibrary",
+            @"E:\Steam",
+            @"E:\SteamLibrary",
+            @"F:\SteamLibrary",
+            @"G:\SteamLibrary"
+        ];
+        foreach (var p in standardPaths) TryAddRoot(p);
+
+        // 3. SteamCMD path if configured
+        string? steamCmdDir = SteamCmdService.FindWorkshopContentDirectory(SteamCmdPath);
+        if (!string.IsNullOrEmpty(steamCmdDir))
+        {
+            var parent = Directory.GetParent(steamCmdDir)?.Parent?.Parent?.FullName;
+            if (!string.IsNullOrEmpty(parent)) TryAddRoot(parent);
+        }
+
+        // 4. Parse libraryfolders.vdf from all discovered Steam roots
+        var discoveredRoots = roots.ToList();
+        foreach (var steamRoot in discoveredRoots)
+        {
+            string vdfPath = Path.Combine(steamRoot, "steamapps", "libraryfolders.vdf");
+            if (File.Exists(vdfPath))
+            {
+                try
+                {
+                    string text = File.ReadAllText(vdfPath);
+                    var matches = System.Text.RegularExpressions.Regex.Matches(text, @"""path""\s+""([^""]+)""");
+                    foreach (System.Text.RegularExpressions.Match match in matches)
+                    {
+                        if (match.Groups.Count > 1)
+                        {
+                            string rawPath = match.Groups[1].Value.Replace(@"\\", @"\");
+                            TryAddRoot(rawPath);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        return roots.ToList();
+    }
     
     private List<string> FindGameVpks(string? currentFilePath)
     {
         var vpkList = new List<string>();
-        if (!string.IsNullOrEmpty(GameDirectory) && System.IO.Directory.Exists(GameDirectory))
-            vpkList.AddRange(System.IO.Directory.GetFiles(GameDirectory, "*_dir.vpk", System.IO.SearchOption.AllDirectories));
-
-        string? currentDir = !string.IsNullOrEmpty(currentFilePath) ? System.IO.Path.GetDirectoryName(currentFilePath) : null;
-        if (currentDir != null)
+        if (!string.IsNullOrEmpty(GameDirectory) && Directory.Exists(GameDirectory))
         {
-            // Auto-detect from Steam Library path if inside workshop
-            string tempDir = currentDir;
-            string? steamAppsDir = null;
-            while (!string.IsNullOrEmpty(tempDir))
+            try
             {
-                if (System.IO.Path.GetFileName(tempDir).Equals("steamapps", StringComparison.OrdinalIgnoreCase))
-                {
-                    steamAppsDir = tempDir;
-                    break;
-                }
-                var parentInfo = System.IO.Directory.GetParent(tempDir);
-                tempDir = parentInfo?.FullName ?? "";
+                vpkList.AddRange(Directory.GetFiles(GameDirectory, "*_dir.vpk", SearchOption.AllDirectories));
             }
+            catch { }
+        }
 
-            if (steamAppsDir != null)
+        string? currentDir = !string.IsNullOrEmpty(currentFilePath) ? Path.GetDirectoryName(currentFilePath) : null;
+        if (!string.IsNullOrEmpty(currentDir) && Directory.Exists(currentDir))
+        {
+            try
             {
-                string commonDir = System.IO.Path.Combine(steamAppsDir, "common");
-                if (System.IO.Directory.Exists(commonDir))
+                vpkList.AddRange(Directory.GetFiles(currentDir, "*_dir.vpk", SearchOption.TopDirectoryOnly));
+                var parent = Directory.GetParent(currentDir)?.FullName;
+                if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
                 {
-                    try {
-                        var hl2 = System.IO.Path.Combine(commonDir, "Half-Life 2");
-                        if (System.IO.Directory.Exists(hl2)) vpkList.AddRange(System.IO.Directory.GetFiles(hl2, "*_dir.vpk", System.IO.SearchOption.TopDirectoryOnly));
-                        
-                        var ep2 = System.IO.Path.Combine(commonDir, "Half-Life 2", "ep2");
-                        if (System.IO.Directory.Exists(ep2)) vpkList.AddRange(System.IO.Directory.GetFiles(ep2, "*_dir.vpk", System.IO.SearchOption.TopDirectoryOnly));
-
-                        var gmod = System.IO.Path.Combine(commonDir, "GarrysMod", "sourceengine");
-                        if (System.IO.Directory.Exists(gmod)) vpkList.AddRange(System.IO.Directory.GetFiles(gmod, "*_dir.vpk", System.IO.SearchOption.TopDirectoryOnly));
-                    } catch {}
+                    vpkList.AddRange(Directory.GetFiles(parent, "*_dir.vpk", SearchOption.TopDirectoryOnly));
                 }
             }
-            else
+            catch { }
+        }
+
+        var steamRoots = GetSteamLibraryRoots(currentFilePath);
+        foreach (var root in steamRoots)
+        {
+            string commonDir = Path.Combine(root, "steamapps", "common");
+            if (!Directory.Exists(commonDir)) continue;
+
+            string[] candidateGames = [
+                Path.Combine(commonDir, "Half-Life 2"),
+                Path.Combine(commonDir, "Half-Life 2", "hl2"),
+                Path.Combine(commonDir, "Half-Life 2", "ep2"),
+                Path.Combine(commonDir, "Half-Life 2", "episodic"),
+                Path.Combine(commonDir, "GarrysMod", "sourceengine"),
+                Path.Combine(commonDir, "GarrysMod", "garrysmod"),
+                Path.Combine(commonDir, "Counter-Strike Source", "cstrike"),
+                Path.Combine(commonDir, "Team Fortress 2", "tf"),
+                Path.Combine(commonDir, "Portal", "portal"),
+                Path.Combine(commonDir, "Portal 2", "portal2"),
+                Path.Combine(commonDir, "Left 4 Dead 2", "left4dead2")
+            ];
+
+            foreach (var cand in candidateGames)
             {
-                string? parentDir = System.IO.Directory.GetParent(currentDir)?.FullName;
-                if (parentDir != null)
+                if (Directory.Exists(cand))
                 {
-                    try 
+                    try
                     {
-                        var allVpks = System.IO.Directory.GetFiles(parentDir, "*_dir.vpk", System.IO.SearchOption.AllDirectories);
-                        vpkList.AddRange(allVpks);
+                        vpkList.AddRange(Directory.GetFiles(cand, "*_dir.vpk", SearchOption.TopDirectoryOnly));
                     }
                     catch { }
                 }
@@ -1684,6 +1906,57 @@ public class MainViewModel : INotifyPropertyChanged
         });
 
         return vpkList;
+    }
+
+    private List<string> FindGameGmas(string? currentFilePath)
+    {
+        var gmaList = new List<string>();
+
+        string? currentDir = !string.IsNullOrEmpty(currentFilePath) ? Path.GetDirectoryName(currentFilePath) : null;
+        if (!string.IsNullOrEmpty(currentDir) && Directory.Exists(currentDir))
+        {
+            try
+            {
+                gmaList.AddRange(Directory.GetFiles(currentDir, "*.gma", SearchOption.TopDirectoryOnly));
+            }
+            catch { }
+        }
+
+        string? steamCmdWorkshop = SteamCmdService.FindWorkshopContentDirectory(SteamCmdPath);
+        if (!string.IsNullOrEmpty(steamCmdWorkshop) && Directory.Exists(steamCmdWorkshop))
+        {
+            try
+            {
+                gmaList.AddRange(Directory.GetFiles(steamCmdWorkshop, "*.gma", SearchOption.AllDirectories));
+            }
+            catch { }
+        }
+
+        var steamRoots = GetSteamLibraryRoots(currentFilePath);
+        foreach (var root in steamRoots)
+        {
+            string gmodAddons = Path.Combine(root, "steamapps", "common", "GarrysMod", "garrysmod", "addons");
+            if (Directory.Exists(gmodAddons))
+            {
+                try
+                {
+                    gmaList.AddRange(Directory.GetFiles(gmodAddons, "*.gma", SearchOption.AllDirectories));
+                }
+                catch { }
+            }
+
+            string gmodWorkshop = Path.Combine(root, "steamapps", "workshop", "content", "4000");
+            if (Directory.Exists(gmodWorkshop))
+            {
+                try
+                {
+                    gmaList.AddRange(Directory.GetFiles(gmodWorkshop, "*.gma", SearchOption.AllDirectories));
+                }
+                catch { }
+            }
+        }
+
+        return gmaList.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     // ── Asset Preview ──────────────────────────────────────────────
@@ -1756,6 +2029,39 @@ public class MainViewModel : INotifyPropertyChanged
             if (ext == ".mdl")
             {
                 await Task.Run(() => LoadModelPreview(asset, data));
+                return;
+            }
+
+            // NavMesh preview
+            if (ext == ".nav" || asset.Type == AssetType.NavMesh)
+            {
+                string navInfo = $"🧭 Navigation Mesh (.nav)\n────────────────────────────────────────\n" +
+                                 $"File: {asset.FileName}\n" +
+                                 $"Path: {asset.FullPath}\n" +
+                                 $"Size: {data.Length:N0} bytes ({data.Length / 1024.0:F1} KB)\n" +
+                                 $"Source: {asset.Source}\n\n";
+
+                if (data.Length >= 8)
+                {
+                    uint magic = BitConverter.ToUInt32(data, 0);
+                    uint version = BitConverter.ToUInt32(data, 4);
+                    bool validMagic = magic == 0xFEEDFACE || magic == 0xCEFAEDFE || magic == 4277009102;
+                    navInfo += $"Valve Magic Header: {(validMagic ? "VALID (0xFEEDFACE)" : $"0x{magic:X8}")}\n" +
+                               $"Nav Mesh Version: {version}\n";
+                    if (data.Length >= 16)
+                    {
+                        uint subVersion = BitConverter.ToUInt32(data, 8);
+                        navInfo += $"Sub-version: {subVersion}\n";
+                    }
+                    navInfo += "\nStatus: Fully verified navigation mesh ready to extract.";
+                }
+                else
+                {
+                    navInfo += "Status: Incomplete or empty navmesh file.";
+                }
+
+                PreviewType = "vmt";
+                PreviewText = navInfo;
                 return;
             }
 
@@ -2358,7 +2664,12 @@ public class MainViewModel : INotifyPropertyChanged
             InfoField3Value = EntityCount.ToString();
 
             StatusText = "Discovering assets...";
-            _allAssets = AssetDiscovery.DiscoverFromBsp(_currentBsp);
+            _allAssets = AssetDiscovery.DiscoverFromBsp(_currentBsp, path);
+
+            var navAsset = _allAssets.FirstOrDefault(a => a.Type == AssetType.NavMesh);
+            if (navAsset != null)
+                AppendLog($"[NavMesh] Found navigation mesh: {navAsset.FileName} ({navAsset.Source})");
+
             BuildAssetTree();
             StatusText = $"Loaded {MapName} — {_allAssets.Count} assets discovered";
             AssetCountText = $"{_allAssets.Count} assets";
@@ -2434,8 +2745,20 @@ public class MainViewModel : INotifyPropertyChanged
             InfoField2Label = "Author: "; InfoField2Value = _currentGma.AddonAuthor;
             InfoField3Label = "Desc: "; InfoField3Value = _currentGma.AddonDescription;
 
+            var bspEntry = _currentGma.Entries.FirstOrDefault(e => e.Path.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase));
+            if (bspEntry != null)
+            {
+                InfoLabel = "Workshop Map (GMA)";
+                AppendLog($"[Workshop Map] GMA contains embedded map: {bspEntry.Path}");
+            }
+
             _allAssets = AssetDiscovery.DiscoverFromGma(_currentGma);
             AssetCountText = $"{_allAssets.Count} assets";
+
+            var navAsset = _allAssets.FirstOrDefault(a => a.Type == AssetType.NavMesh);
+            if (navAsset != null)
+                AppendLog($"[NavMesh] Found navigation mesh: {navAsset.FileName} ({navAsset.Source})");
+
             BuildAssetTree();
             StatusText = $"Loaded addon '{_currentGma.AddonName}' — {_allAssets.Count} assets discovered";
             _ = MountGameVpksAsync(gmaPath);
@@ -2546,7 +2869,8 @@ public class MainViewModel : INotifyPropertyChanged
                 $"PreserveDirectoryStructure={PreserveDirectoryStructure}",
                 $"ModelConversionFormatIndex={ModelConversionFormatIndex}",
                 $"CustomAssetsDirectory={CustomAssetsDirectory}",
-                $"TextureFormatIndex={TextureFormatIndex}"
+                $"TextureFormatIndex={TextureFormatIndex}",
+                $"ExtractOriginalAssets={ExtractOriginalAssets}"
             };
             System.IO.File.WriteAllLines(dialog.FileName, lines);
             AppendLog($"Preset saved: {System.IO.Path.GetFileName(dialog.FileName)}");
@@ -2586,6 +2910,7 @@ public class MainViewModel : INotifyPropertyChanged
             if (dict.TryGetValue("ModelConversionFormatIndex", out var mcf) && int.TryParse(mcf, out var mcfv)) ModelConversionFormatIndex = mcfv;
             if (dict.TryGetValue("CustomAssetsDirectory", out var cad)) CustomAssetsDirectory = cad;
             if (dict.TryGetValue("TextureFormatIndex", out var tfi) && int.TryParse(tfi, out var tfiv)) TextureFormatIndex = tfiv;
+            if (dict.TryGetValue("ExtractOriginalAssets", out var eoa) && bool.TryParse(eoa, out var eoav)) ExtractOriginalAssets = eoav;
 
             AppendLog($"Preset loaded: {System.IO.Path.GetFileName(dialog.FileName)}");
             StatusText = "Preset loaded";
@@ -2656,6 +2981,7 @@ public class MainViewModel : INotifyPropertyChanged
                         GenerateMissingPlaceholders = GenerateMissingPlaceholders,
                         SkipExistingFiles = SkipExistingFiles,
                         KeepMdlFile = KeepMdlFile,
+                        ExtractOriginalAssets = ExtractOriginalAssets,
                         ModelExportFormat = (ModelFormat)ModelConversionFormatIndex,
                         TextureOutputFormat = (TextureFormat)TextureFormatIndex
                     };
@@ -2681,6 +3007,12 @@ public class MainViewModel : INotifyPropertyChanged
                         case ".gma":
                             pipeline.LoadGma(file);
                             var gma = new GmaReader(file);
+                            var bspEntry = gma.Entries.FirstOrDefault(e => e.Path.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase));
+                            if (bspEntry != null)
+                            {
+                                byte[]? bspData = gma.ExtractEntry(bspEntry);
+                                if (bspData != null) pipeline.LoadBspData(bspData, bspEntry.Path);
+                            }
                             assets = AssetDiscovery.DiscoverFromGma(gma);
                             break;
                         default:
@@ -2688,12 +3020,19 @@ public class MainViewModel : INotifyPropertyChanged
                             continue;
                     }
 
-                    // Mount game VPKs if configured
+                    // Mount game VPKs & GMAs if configured
                     if (options.ExtractGameDependencies)
                     {
                         var vpkList = FindGameVpks(file);
                         foreach (var vpkFile in vpkList.Take(50))
                             pipeline.LoadVpk(vpkFile);
+
+                        var gmaList = FindGameGmas(file);
+                        foreach (var gmaFile in gmaList.Take(30))
+                        {
+                            if (!string.Equals(gmaFile, file, StringComparison.OrdinalIgnoreCase))
+                                pipeline.LoadGma(gmaFile);
+                        }
                     }
 
                     await pipeline.ExtractAsync(assets, CancellationToken.None);
@@ -2749,9 +3088,44 @@ public class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private byte[]? ResolveAssetData(string path)
     {
-        // Normalize path separators
+        if (string.IsNullOrWhiteSpace(path)) return null;
         path = path.Replace('\\', '/').TrimStart('/');
 
+        var candidates = new List<string> { path };
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext == ".vtf" || ext == ".vmt")
+        {
+            if (!path.StartsWith("materials/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"materials/{path}");
+        }
+        else if (ext == ".mdl" || ext.EndsWith(".vtx", StringComparison.OrdinalIgnoreCase) || ext == ".vvd" || ext == ".phy" || ext == ".ani")
+        {
+            if (!path.StartsWith("models/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"models/{path}");
+        }
+        else if (ext == ".wav" || ext == ".mp3" || ext == ".ogg")
+        {
+            if (!path.StartsWith("sound/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"sound/{path}");
+        }
+        else if (ext == ".nav" || ext == ".ain")
+        {
+            if (!path.StartsWith("maps/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"maps/{path}");
+            candidates.Add(Path.GetFileName(path));
+        }
+
+        foreach (var cand in candidates)
+        {
+            var data = ResolveAssetDataInternal(cand);
+            if (data != null) return data;
+        }
+
+        return null;
+    }
+
+    private byte[]? ResolveAssetDataInternal(string path)
+    {
         // 1. BSP embedded files (pakfile lump → ZIP entries)
         if (_currentBsp != null)
         {
@@ -2770,8 +3144,7 @@ public class MainViewModel : INotifyPropertyChanged
         // 2. Main GMA entry
         if (_currentGma != null)
         {
-            var entry = _currentGma.Entries.FirstOrDefault(e => 
-                string.Equals(e.Path.Replace('\\', '/').TrimStart('/'), path, StringComparison.OrdinalIgnoreCase));
+            var entry = _currentGma.FindEntry(path);
             if (entry != null)
             {
                 return _currentGma.ExtractEntry(entry);
@@ -2781,8 +3154,7 @@ public class MainViewModel : INotifyPropertyChanged
         // 2.5 Dependency GMAs
         foreach (var gma in _dependencyGmas.Values)
         {
-            var entry = gma.Entries.FirstOrDefault(e => 
-                string.Equals(e.Path.Replace('\\', '/').TrimStart('/'), path, StringComparison.OrdinalIgnoreCase));
+            var entry = gma.FindEntry(path);
             if (entry != null)
             {
                 return gma.ExtractEntry(entry);
@@ -2845,6 +3217,11 @@ public class MainViewModel : INotifyPropertyChanged
                 string physicalPath = System.IO.Path.Combine(currentFileDir, diskPath);
                 if (System.IO.File.Exists(physicalPath)) return System.IO.File.ReadAllBytes(physicalPath);
 
+                // Direct filename match in current dir (crucial for .nav/.ain next to .bsp!)
+                string fileNameOnly = Path.GetFileName(diskPath);
+                string directFile = Path.Combine(currentFileDir, fileNameOnly);
+                if (File.Exists(directFile)) return File.ReadAllBytes(directFile);
+
                 string? parentDir = System.IO.Directory.GetParent(currentFileDir)?.FullName;
                 if (!string.IsNullOrEmpty(parentDir))
                 {
@@ -2857,6 +3234,14 @@ public class MainViewModel : INotifyPropertyChanged
             {
                 string physicalPath = System.IO.Path.Combine(GameDirectory, diskPath);
                 if (System.IO.File.Exists(physicalPath)) return System.IO.File.ReadAllBytes(physicalPath);
+            }
+
+            // Check SteamCMD workshop content directory
+            string? workshopDir = SteamCmdService.FindWorkshopContentDirectory(SteamCmdPath);
+            if (!string.IsNullOrEmpty(workshopDir) && Directory.Exists(workshopDir))
+            {
+                string physicalPath = Path.Combine(workshopDir, diskPath);
+                if (File.Exists(physicalPath)) return File.ReadAllBytes(physicalPath);
             }
         }
         catch { }

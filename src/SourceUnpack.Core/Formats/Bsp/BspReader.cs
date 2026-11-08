@@ -119,11 +119,13 @@ public class BspReader : IDisposable
 {
     private readonly BinaryReader _reader;
     private readonly Stream _stream;
+    public string? FilePath { get; private set; }
     public BspHeader Header { get; private set; } = new();
     public bool IsValid { get; private set; }
 
     public BspReader(string filePath)
     {
+        FilePath = filePath;
         _stream = File.OpenRead(filePath);
         _reader = new BinaryReader(_stream);
         ReadHeader();

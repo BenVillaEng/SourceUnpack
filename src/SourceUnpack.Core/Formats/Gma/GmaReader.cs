@@ -23,7 +23,9 @@ public class GmaReader : IDisposable
 {
     private readonly BinaryReader _reader;
     private readonly FileStream _stream;
+    private readonly Dictionary<string, GmaEntry> _entryLookup = new(StringComparer.OrdinalIgnoreCase);
 
+    public string? FilePath { get; private set; }
     public bool IsValid { get; private set; }
     public byte FormatVersion { get; private set; }
     public string AddonName { get; private set; } = string.Empty;
@@ -34,6 +36,7 @@ public class GmaReader : IDisposable
 
     public GmaReader(string filePath)
     {
+        FilePath = filePath;
         _stream = File.OpenRead(filePath);
         _reader = new BinaryReader(_stream, Encoding.UTF8, leaveOpen: true);
         Parse();
@@ -86,6 +89,8 @@ public class GmaReader : IDisposable
                     Crc = _reader.ReadUInt32()
                 };
 
+                var cleanPath = entry.Path.TrimStart('/');
+                _entryLookup[cleanPath] = entry;
                 Entries.Add(entry);
             }
 
@@ -106,22 +111,36 @@ public class GmaReader : IDisposable
     }
 
     /// <summary>
-    /// Extract the byte data of a specific GMA entry.
+    /// Find an entry by its path (case-insensitive, slashes normalized).
+    /// </summary>
+    public GmaEntry? FindEntry(string path)
+    {
+        path = path.Replace('\\', '/').Trim().TrimStart('/');
+        if (_entryLookup.TryGetValue(path, out var entry))
+            return entry;
+        return null;
+    }
+
+    /// <summary>
+    /// Extract the byte data of a specific GMA entry (thread-safe).
     /// </summary>
     public byte[]? ExtractEntry(GmaEntry entry)
     {
         try
         {
-            _stream.Seek(entry.DataOffset, SeekOrigin.Begin);
-            byte[] data = new byte[entry.Size];
-            int totalRead = 0;
-            while (totalRead < entry.Size)
+            lock (_stream)
             {
-                int read = _stream.Read(data, totalRead, (int)(entry.Size - totalRead));
-                if (read == 0) break;
-                totalRead += read;
+                _stream.Seek(entry.DataOffset, SeekOrigin.Begin);
+                byte[] data = new byte[entry.Size];
+                int totalRead = 0;
+                while (totalRead < entry.Size)
+                {
+                    int read = _stream.Read(data, totalRead, (int)(entry.Size - totalRead));
+                    if (read == 0) break;
+                    totalRead += read;
+                }
+                return totalRead == entry.Size ? data : null;
             }
-            return totalRead == entry.Size ? data : null;
         }
         catch
         {

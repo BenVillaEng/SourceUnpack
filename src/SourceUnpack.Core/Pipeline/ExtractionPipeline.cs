@@ -2,6 +2,7 @@ using SourceUnpack.Core.Conversion;
 using SourceUnpack.Core.Formats.Bsp;
 using SourceUnpack.Core.Formats.Gma;
 using SourceUnpack.Core.Formats.Mdl;
+using SourceUnpack.Core.Formats.Vmt;
 using SourceUnpack.Core.Formats.Vpk;
 using SourceUnpack.Core.Models;
 
@@ -21,9 +22,9 @@ public class ExtractionProgressEventArgs : EventArgs
 
 /// <summary>
 /// Orchestrates the full asset extraction and conversion workflow.
-/// Coordinates BSP/VPK reading, asset discovery, and conversion to output formats.
+/// Coordinates BSP/VPK/GMA reading, asset discovery, and conversion or original extraction.
 /// </summary>
-public class ExtractionPipeline
+public class ExtractionPipeline : IDisposable
 {
     public event EventHandler<ExtractionProgressEventArgs>? ProgressChanged;
     public event EventHandler<string>? LogMessage;
@@ -31,11 +32,12 @@ public class ExtractionPipeline
 
     private readonly ConversionOptions _options;
     private BspReader? _bsp;
-    private List<VpkReader> _vpks = new();
-    private Dictionary<string, byte[]> _pakFiles = new();
-    private GmaReader? _gma;
-    private Dictionary<string, byte[]> _gmaFiles = new();
-    private List<string> _customDirectories = new();
+    private string? _bspPath;
+    private readonly List<VpkReader> _vpks = new();
+    private Dictionary<string, byte[]> _pakFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<GmaReader> _gmas = new();
+    private readonly Dictionary<string, byte[]> _gmaFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _customDirectories = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _extractedFiles = new();
 
     public ExtractionPipeline(ConversionOptions options)
@@ -49,6 +51,8 @@ public class ExtractionPipeline
     public List<AssetInfo> LoadBsp(string bspPath)
     {
         LogSystem($"Loading BSP: {Path.GetFileName(bspPath)}");
+        _bspPath = bspPath;
+        _bsp?.Dispose();
         _bsp = new BspReader(bspPath);
 
         if (!_bsp.IsValid)
@@ -63,11 +67,42 @@ public class ExtractionPipeline
         _pakFiles = _bsp.ExtractPakfile();
         LogSystem($"Found {_pakFiles.Count} files in pakfile lump.");
 
-        var assets = AssetDiscovery.DiscoverFromBsp(_bsp);
+        var assets = AssetDiscovery.DiscoverFromBsp(_bsp, bspPath);
         var stats = AssetDiscovery.GetStats(assets);
-        LogSystem($"Discovered: {stats.textures} textures, {stats.models} models, {stats.sounds} sounds, {stats.skyboxes} skybox faces");
+        LogSystem($"Discovered: {stats.textures} textures, {stats.models} models, {stats.sounds} sounds, {stats.skyboxes} skybox faces, {stats.other} other");
 
         return assets;
+    }
+
+    /// <summary>
+    /// Load a BSP from a stream (e.g. from an embedded GMA map).
+    /// </summary>
+    public List<AssetInfo> LoadBsp(Stream stream, string virtualPath = "map.bsp")
+    {
+        LogSystem($"Loading embedded BSP: {Path.GetFileName(virtualPath)}");
+        _bspPath = virtualPath;
+        _bsp?.Dispose();
+        _bsp = new BspReader(stream);
+
+        if (!_bsp.IsValid)
+        {
+            LogSystem("ERROR: Invalid BSP data.");
+            return new();
+        }
+
+        _pakFiles = _bsp.ExtractPakfile();
+        LogSystem($"Found {_pakFiles.Count} files in pakfile lump.");
+
+        var assets = AssetDiscovery.DiscoverFromBsp(_bsp, virtualPath);
+        return assets;
+    }
+
+    /// <summary>
+    /// Load a BSP from byte data.
+    /// </summary>
+    public List<AssetInfo> LoadBspData(byte[] bspData, string virtualPath = "map.bsp")
+    {
+        return LoadBsp(new MemoryStream(bspData), virtualPath);
     }
 
     /// <summary>
@@ -75,8 +110,11 @@ public class ExtractionPipeline
     /// </summary>
     public void LoadVpk(string vpkPath)
     {
-        try 
+        try
         {
+            if (_vpks.Any(v => string.Equals(v.FilePath, vpkPath, StringComparison.OrdinalIgnoreCase)))
+                return;
+
             LogSystem($"Mounting VPK: {Path.GetFileName(vpkPath)}");
             var vpk = new VpkReader(vpkPath);
             _vpks.Add(vpk);
@@ -93,54 +131,92 @@ public class ExtractionPipeline
     /// </summary>
     public void ClearVpks()
     {
+        foreach (var vpk in _vpks) vpk.Dispose();
         _vpks.Clear();
         LogSystem("Unmounted all VPKs.");
     }
 
     /// <summary>
-    /// Load a GMA (Garry's Mod Addon) archive and store its files.
+    /// Load a GMA (Garry's Mod Addon) archive.
+    /// Uses on-demand streaming to minimize memory usage.
     /// </summary>
     public void LoadGma(string gmaPath)
     {
-        LogSystem($"Loading GMA: {Path.GetFileName(gmaPath)}");
-        _gma = new GmaReader(gmaPath);
-
-        if (!_gma.IsValid)
+        try
         {
-            LogSystem("ERROR: Invalid GMA file.");
-            return;
-        }
+            if (!File.Exists(gmaPath)) return;
+            if (_gmas.Any(g => string.Equals(g.FilePath, gmaPath, StringComparison.OrdinalIgnoreCase)))
+                return;
 
-        LogSystem($"GMA Addon: {_gma.AddonName} | Files: {_gma.Entries.Count}");
-        var files = _gma.ExtractAll();
-        foreach (var file in files)
-        {
-            _gmaFiles[file.Key] = file.Value;
+            LogSystem($"Mounting GMA: {Path.GetFileName(gmaPath)}");
+            var gma = new GmaReader(gmaPath);
+
+            if (!gma.IsValid)
+            {
+                LogSystem("ERROR: Invalid GMA file.");
+                gma.Dispose();
+                return;
+            }
+
+            _gmas.Add(gma);
+            LogSystem($"  Mounted GMA: '{gma.AddonName}' — {gma.Entries.Count} entries");
         }
-        LogSystem($"Extracted {_gmaFiles.Count} total files from GMAs.");
+        catch (Exception ex)
+        {
+            LogSystem($"  ERROR mounting GMA: {ex.Message}");
+        }
     }
 
     /// <summary>
-    /// Load a loose directory to use for resolving custom assets (e.g. from a decompiled addon).
+    /// Load raw files from a GMA in-memory dictionary.
+    /// </summary>
+    public void LoadGmaFiles(Dictionary<string, byte[]> files)
+    {
+        foreach (var file in files)
+        {
+            string clean = file.Key.Replace('\\', '/').TrimStart('/');
+            _gmaFiles[clean] = file.Value;
+        }
+    }
+
+    /// <summary>
+    /// Load a loose directory to use for resolving custom assets (e.g. from an addon or workshop download).
+    /// Automatically mounts any embedded .gma and *_dir.vpk files inside it.
     /// </summary>
     public void LoadDirectory(string directoryPath)
     {
-        if (Directory.Exists(directoryPath))
-        {
-            if (!_customDirectories.Contains(directoryPath, StringComparer.OrdinalIgnoreCase))
-            {
-                _customDirectories.Add(directoryPath);
-                LogSystem($"Mounted Custom Folder: {directoryPath}");
-            }
-        }
-        else
+        if (!Directory.Exists(directoryPath))
         {
             LogSystem($"  ERROR mounting Custom Folder: Directory not found - {directoryPath}");
+            return;
         }
+
+        if (!_customDirectories.Contains(directoryPath, StringComparer.OrdinalIgnoreCase))
+        {
+            _customDirectories.Add(directoryPath);
+            LogSystem($"Mounted Custom Folder: {directoryPath}");
+        }
+
+        // Auto-mount any GMAs inside this directory (e.g. garrysmod/addons or workshop)
+        try
+        {
+            var gmaFiles = Directory.GetFiles(directoryPath, "*.gma", SearchOption.AllDirectories);
+            foreach (var gma in gmaFiles.Take(30))
+            {
+                LoadGma(gma);
+            }
+
+            var vpkFiles = Directory.GetFiles(directoryPath, "*_dir.vpk", SearchOption.AllDirectories);
+            foreach (var vpk in vpkFiles.Take(30))
+            {
+                LoadVpk(vpk);
+            }
+        }
+        catch { }
     }
 
     /// <summary>
-    /// Extract and convert selected assets.
+    /// Extract and convert or unpack selected assets.
     /// </summary>
     public async Task ExtractAsync(List<AssetInfo> assets, CancellationToken cancellationToken = default)
     {
@@ -149,7 +225,12 @@ public class ExtractionPipeline
         var progressLock = new object();
         _extractedFiles.Clear();
 
+        string modeDesc = _options.ExtractOriginalAssets
+            ? "ORIGINAL VALVE FORMATS (.vtf, .mdl+companions, .vmt, .nav)"
+            : $"CONVERTED FORMATS (Models: {_options.ModelExportFormat}, Textures: {_options.TextureOutputFormat})";
+
         Log($"Starting extraction of {total} assets to: {_options.OutputDirectory}");
+        Log($"Mode: {modeDesc}");
         Log($"Using {Environment.ProcessorCount} parallel workers for maximum CPU utilization.");
         Directory.CreateDirectory(_options.OutputDirectory);
 
@@ -159,7 +240,7 @@ public class ExtractionPipeline
             CancellationToken = cancellationToken
         };
 
-        await Parallel.ForEachAsync(assets, parallelOptions, async (asset, ct) =>
+        await Parallel.ForEachAsync(assets, parallelOptions, (asset, ct) =>
         {
             int progress = Interlocked.Increment(ref current);
             lock (progressLock)
@@ -175,17 +256,18 @@ public class ExtractionPipeline
                         ExtractTexture(asset);
                         break;
                     case AssetType.Material:
-                        await ExtractMaterial(asset, ct);
+                        ExtractMaterial(asset, ct);
                         break;
                     case AssetType.Sound:
                         ExtractSound(asset);
                         break;
                     case AssetType.Model:
-                        await ExtractModel(asset, ct);
+                        ExtractModel(asset, ct);
                         break;
                     case AssetType.Skybox:
                         ExtractSkybox(asset);
                         break;
+                    case AssetType.NavMesh:
                     default:
                         ExtractRaw(asset);
                         break;
@@ -198,28 +280,30 @@ public class ExtractionPipeline
                     Log($"  ERROR: {asset.FullPath} — {ex.Message}");
                 }
             }
+            return ValueTask.CompletedTask;
         });
 
         Log($"Extraction complete. {current}/{total} assets processed.");
     }
 
-
     private void ExtractTexture(AssetInfo asset)
     {
-        string texExt = TextureConverter.GetExtension(_options.TextureOutputFormat);
+        bool isOriginal = _options.ExtractOriginalAssets || _options.TextureOutputFormat == TextureFormat.Original;
+        string texExt = isOriginal ? ".vtf" : TextureConverter.GetExtension(_options.TextureOutputFormat);
         string outputPath = GetOutputPath(asset.FullPath, texExt);
 
         if (!_extractedFiles.TryAdd(outputPath.ToLowerInvariant(), true)) return;
 
-        if (_options.SkipExistingFiles && File.Exists(outputPath)) {
+        if (_options.SkipExistingFiles && File.Exists(outputPath))
+        {
             Log($"  SKIP: {asset.FullPath} (already exists on disk)");
             return;
         }
 
         byte[]? data = GetAssetData(asset.FullPath, out string sourceDescription);
-        if (data == null) 
-        { 
-            if (_options.GenerateMissingPlaceholders)
+        if (data == null)
+        {
+            if (_options.GenerateMissingPlaceholders && !isOriginal)
             {
                 byte[] placeholder = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z/C/HgAGgwJ/lK3Q6wAAAABJRU5ErkJggg==");
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
@@ -228,9 +312,9 @@ public class ExtractionPipeline
             }
             else
             {
-                Log($"  SKIP: {asset.FullPath} (not found)"); 
+                Log($"  SKIP: {asset.FullPath} (not found)");
             }
-            return; 
+            return;
         }
 
         if (sourceDescription.StartsWith("VPK:"))
@@ -239,13 +323,22 @@ public class ExtractionPipeline
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-        if (TextureConverter.VtfToFile(data, outputPath, _options.TextureOutputFormat))
-            Log($"  OK: {asset.FullPath} → {Path.GetFileName(outputPath)}");
+
+        if (isOriginal)
+        {
+            File.WriteAllBytes(outputPath, data);
+            Log($"  OK: {asset.FullPath} → {Path.GetFileName(outputPath)} (Original VTF)");
+        }
         else
-            Log($"  FAIL: {asset.FullPath} (decode error)");
+        {
+            if (TextureConverter.VtfToFile(data, outputPath, _options.TextureOutputFormat))
+                Log($"  OK: {asset.FullPath} → {Path.GetFileName(outputPath)}");
+            else
+                Log($"  FAIL: {asset.FullPath} (decode error)");
+        }
     }
 
-    private async Task ExtractMaterial(AssetInfo asset, CancellationToken ct)
+    private void ExtractMaterial(AssetInfo asset, CancellationToken ct)
     {
         string outputPath = GetOutputPath(asset.FullPath);
 
@@ -254,89 +347,56 @@ public class ExtractionPipeline
         byte[]? data = GetAssetData(asset.FullPath);
         if (data == null) return;
 
-        if (!(_options.SkipExistingFiles && File.Exists(outputPath))) {
+        if (!(_options.SkipExistingFiles && File.Exists(outputPath)))
+        {
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
             File.WriteAllBytes(outputPath, data);
-        } else {
+            Log($"  OK: {asset.FullPath} → {Path.GetFileName(outputPath)}");
+        }
+        else
+        {
             Log($"  SKIP: {asset.FullPath} (already exists on disk)");
         }
 
-        // Recursive: Parse and extract referenced textures
+        // Parse and extract all referenced textures
         try
         {
             string vmtContent = System.Text.Encoding.UTF8.GetString(data);
-            var info = SourceUnpack.Core.Formats.Vmt.VmtReader.Parse(vmtContent);
+            var info = VmtReader.Parse(vmtContent);
 
-            var texturesToExtract = new List<string?>
-            {
-                info.BaseTexture,
-                info.BumpMap,
-                info.NormalMap,
-                info.EnvMapMask,
-                info.DetailTexture,
-                info.PhongExponentTexture,
-                info.SelfIllumMask
-            };
+            var texturesToExtract = info.GetAllReferencedTextures().ToList();
 
-            // Handle Patch/Include materials
+            // Handle Patch/Include materials recursively
             if (!string.IsNullOrEmpty(info.Include))
             {
-                 // Recursively extract the included base material
-                 string baseMatPath = info.Include;
-                 if (!baseMatPath.EndsWith(".vmt", StringComparison.OrdinalIgnoreCase))
-                     baseMatPath += ".vmt";
-                 
-                 // Normalize path (Source engine style)
-                 baseMatPath = baseMatPath.Replace('\\', '/');
-                 if (!baseMatPath.StartsWith("materials/", StringComparison.OrdinalIgnoreCase) && 
-                      !baseMatPath.Contains("/")) 
-                     baseMatPath = $"materials/{baseMatPath}";
-                 else if (!baseMatPath.StartsWith("materials/", StringComparison.OrdinalIgnoreCase))
-                     baseMatPath = $"materials/{baseMatPath}"; // Force materials prefix if not absolute
+                string baseMatPath = info.Include.Replace('\\', '/');
+                if (!baseMatPath.EndsWith(".vmt", StringComparison.OrdinalIgnoreCase))
+                    baseMatPath += ".vmt";
+                if (!baseMatPath.StartsWith("materials/", StringComparison.OrdinalIgnoreCase))
+                    baseMatPath = $"materials/{baseMatPath}";
 
-                 // Recursively call ExtractMaterial on the base material
-                 // But wait, ExtractMaterial usually takes an AssetInfo.
-                 // We need to resolve the base material's data first.
-                 
-                 // Logic: If included path exists, parse IT and add its textures to our list.
-                 byte[]? baseData = GetAssetData(baseMatPath);
-                 if (baseData != null)
-                 {
-                     try
-                     {
-                         var baseInfo = SourceUnpack.Core.Formats.Vmt.VmtReader.Parse(baseData);
-                         // Merge textures from base material
-                         texturesToExtract.Add(baseInfo.BaseTexture);
-                         texturesToExtract.Add(baseInfo.BumpMap);
-                         texturesToExtract.Add(baseInfo.NormalMap);
-                         texturesToExtract.Add(baseInfo.EnvMapMask);
-                         texturesToExtract.Add(baseInfo.DetailTexture);
-                         texturesToExtract.Add(baseInfo.PhongExponentTexture);
-                         texturesToExtract.Add(baseInfo.SelfIllumMask);
-                         
-                         // Also extract the base material VMT itself (optional)
-                         // await ExtractMaterial(new AssetInfo { FullPath = baseMatPath, Type = AssetType.Material }, ct);
-                     }
-                     catch (Exception ex)
-                     {
-                         Log($"  WARN: Failed to parse base material {baseMatPath}: {ex.Message}");
-                     }
-                 }
-                 else
-                 {
-                     Log($"  WARN: Missing base material {baseMatPath} for patch {asset.FileName}");
-                 }
+                byte[]? baseData = GetAssetData(baseMatPath);
+                if (baseData != null)
+                {
+                    try
+                    {
+                        var baseInfo = VmtReader.Parse(baseData);
+                        foreach (var t in baseInfo.GetAllReferencedTextures())
+                        {
+                            if (!texturesToExtract.Contains(t, StringComparer.OrdinalIgnoreCase))
+                                texturesToExtract.Add(t);
+                        }
+                    }
+                    catch { }
+                }
             }
 
-            foreach (var texName in texturesToExtract.Where(t => !string.IsNullOrEmpty(t)))
+            foreach (var rawTexName in texturesToExtract)
             {
-                string texPath = texName!.Replace('\\', '/');
+                string texPath = rawTexName.Replace('\\', '/').TrimStart('/');
                 if (!texPath.EndsWith(".vtf", StringComparison.OrdinalIgnoreCase))
                     texPath += ".vtf";
-                
-                // Ensure path starts with "materials/" if not present (Source engine quirk)
-                // Actually VMT paths are relative to materials/ usually, or absolute from root.
-                // Standard: "brick/brickwall01" -> "materials/brick/brickwall01.vtf"
+
                 if (!texPath.StartsWith("materials/", StringComparison.OrdinalIgnoreCase))
                     texPath = $"materials/{texPath}";
 
@@ -346,7 +406,7 @@ public class ExtractionPipeline
                     Type = AssetType.Texture
                 };
 
-                await Task.Run(() => ExtractTexture(texAsset), ct);
+                ExtractTexture(texAsset);
             }
         }
         catch (Exception ex)
@@ -362,7 +422,8 @@ public class ExtractionPipeline
 
         if (!_extractedFiles.TryAdd(outputPath.ToLowerInvariant(), true)) return;
 
-        if (_options.SkipExistingFiles && File.Exists(outputPath)) {
+        if (_options.SkipExistingFiles && File.Exists(outputPath))
+        {
             Log($"  SKIP: {asset.FullPath} (already exists on disk)");
             return;
         }
@@ -375,14 +436,17 @@ public class ExtractionPipeline
             Log($"  OK: {asset.FullPath} → {Path.GetFileName(outputPath)}");
     }
 
-    private async Task ExtractModel(AssetInfo asset, CancellationToken ct)
+    private void ExtractModel(AssetInfo asset, CancellationToken ct)
     {
-        string basePath = asset.FullPath;
+        string basePath = asset.FullPath.Replace('\\', '/');
         if (!basePath.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase)) return;
 
         string modelDir = GetOutputPath(Path.GetDirectoryName(basePath) ?? "models");
         string modelName = Path.GetFileNameWithoutExtension(basePath);
-        string modelExt = _options.ModelExportFormat switch
+
+        bool isOriginal = _options.ExtractOriginalAssets || _options.ModelExportFormat == ModelFormat.Original;
+
+        string modelExt = isOriginal ? ".mdl" : _options.ModelExportFormat switch
         {
             ModelFormat.Fbx => ".mdl",
             ModelFormat.Gltf => ".gltf",
@@ -393,19 +457,23 @@ public class ExtractionPipeline
 
         if (!_extractedFiles.TryAdd(outputPath.ToLowerInvariant(), true)) return;
 
-        if (_options.SkipExistingFiles && File.Exists(outputPath)) {
+        if (_options.SkipExistingFiles && File.Exists(outputPath))
+        {
             Log($"  SKIP: {asset.FullPath} (already exists on disk)");
             return;
         }
 
-        string vvdPath = Path.ChangeExtension(basePath, ".vvd");
-
         byte[]? mdlData = GetAssetData(basePath);
+        if (mdlData == null)
+        {
+            Log($"  FAIL: {asset.FullPath} (MDL not found)");
+            return;
+        }
 
-        // Diagnostic: detect MDL version and checksum for companion validation
+        // Companion files resolution (.vvd, .vtx variants, .phy, .ani)
         int mdlVersion = -1;
         int mdlChecksum = 0;
-        if (mdlData != null && mdlData.Length >= 12)
+        if (mdlData.Length >= 12)
         {
             int magic = BitConverter.ToInt32(mdlData, 0);
             if (magic == 0x54534449) // "IDST"
@@ -415,114 +483,101 @@ public class ExtractionPipeline
             }
         }
 
-        // VVD resolution with checksum validation
+        string vvdPath = Path.ChangeExtension(basePath, ".vvd");
         byte[]? vvdData = GetAssetData(vvdPath);
-        if (vvdData != null && mdlChecksum != 0 && vvdData.Length >= 12)
-        {
-            int vvdChecksum = BitConverter.ToInt32(vvdData, 8);
-            if (vvdChecksum != mdlChecksum)
-            {
-                Log($"  WARN: VVD checksum mismatch ({vvdChecksum:X8} vs MDL {mdlChecksum:X8}), skipping");
-                vvdData = null;
-            }
-        }
 
-        // VTX resolution — Crowbar order: .dx11.vtx -> .dx90.vtx -> .dx80.vtx -> .sw.vtx -> .vtx
-        // Each candidate is validated against the MDL checksum
         byte[]? vtxData = null;
         string[] vtxExtensions = { ".dx11.vtx", ".dx90.vtx", ".dx80.vtx", ".sw.vtx", ".vtx" };
+        byte[]? fallbackVtx = null;
+
         foreach (var ext in vtxExtensions)
         {
-            string vtxPath = Path.ChangeExtension(basePath, ext);
-            byte[]? candidate = GetAssetData(vtxPath);
+            string candidatePath = Path.ChangeExtension(basePath, ext);
+            byte[]? candidate = GetAssetData(candidatePath);
             if (candidate != null)
             {
+                if (fallbackVtx == null) fallbackVtx = candidate;
                 if (mdlChecksum != 0 && candidate.Length >= 20)
                 {
                     int vtxChecksum = BitConverter.ToInt32(candidate, 16);
-                    if (vtxChecksum != mdlChecksum)
+                    if (vtxChecksum == mdlChecksum)
                     {
-                        Log($"  INFO: {ext} checksum mismatch ({vtxChecksum:X8} vs MDL {mdlChecksum:X8}), trying next");
-                        continue;
+                        vtxData = candidate;
+                        break;
                     }
                 }
-                vtxData = candidate;
-                break;
+                else
+                {
+                    vtxData = candidate;
+                    break;
+                }
             }
         }
-
-        // Log diagnostic info about companion file resolution
-        if (vvdData == null || vtxData == null)
+        if (vtxData == null && fallbackVtx != null)
         {
-            string missing = "";
-            if (vvdData == null) missing += ".vvd ";
-            if (vtxData == null) missing += ".vtx ";
-            Log($"  WARN: {asset.FullPath} — Missing companion files: {missing.Trim()}");
-            if (mdlVersion > 0)
-            {
-                Log($"  INFO: MDL format version {mdlVersion}" + 
-                    (mdlVersion > 53 ? " (Source 2 / unknown format — NOT supported)" :
-                     mdlVersion >= 44 ? " (supported v44-v53)" : " (too old — unsupported)"));
-            }
-            Log($"  TIP: Set Game Directory to your game folder, or add custom assets path containing VVD/VTX files");
+            vtxData = fallbackVtx;
         }
 
+        // Additional companions: .phy (physics) and .ani (extra animations)
+        byte[]? phyData = GetAssetData(Path.ChangeExtension(basePath, ".phy"));
+        byte[]? aniData = GetAssetData(Path.ChangeExtension(basePath, ".ani"));
+
+        // ── 1. ORIGINAL VALVE FORMAT EXTRACTION ──────────────────────────────
+        if (isOriginal)
+        {
+            Directory.CreateDirectory(modelDir);
+            File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
+
+            if (vvdData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
+            if (vtxData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
+            if (phyData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.phy"), phyData);
+            if (aniData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.ani"), aniData);
+
+            string comps = (vvdData != null ? " .vvd" : "") +
+                           (vtxData != null ? " .vtx" : "") +
+                           (phyData != null ? " .phy" : "") +
+                           (aniData != null ? " .ani" : "");
+
+            Log($"  OK: {asset.FullPath} → {modelName}.mdl{comps} (Original Valve Model)");
+
+            // Extract model materials
+            var (matNames, matPaths) = MdlReader.GetMaterialReferences(mdlData);
+            ExtractModelMaterials(matNames, matPaths, ct);
+            return;
+        }
+
+        // ── 2. CONVERTED FORMAT EXTRACTION ──────────────────────────────────
         var reader = new MdlReader();
-        var model = (mdlData != null && vvdData != null && vtxData != null) 
-            ? reader.Load(mdlData, vvdData, vtxData) 
-            : new MdlModelData(); // empty/invalid model
-
-        // If Load returned invalid but we had all files, log version info
-        if (!model.IsValid && mdlData != null && vvdData != null && vtxData != null && mdlVersion > 0)
-        {
-            Log($"  WARN: MDL v{mdlVersion} loaded all 3 files but parsing failed — possible file corruption or unsupported sub-format");
-        }
+        var model = (vvdData != null && vtxData != null)
+            ? reader.Load(mdlData, vvdData, vtxData)
+            : new MdlModelData();
 
         if (_options.ModelExportFormat == ModelFormat.Fbx)
         {
-            if (mdlData != null)
-            {
-                Directory.CreateDirectory(modelDir);
-                File.WriteAllBytes(outputPath, mdlData);
-                if (vvdData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
-                if (vtxData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
-                
-                string ext = vtxData == null ? "vtx(missing)" : ".vtx";
-                Log($"  RAW (FBX Placeholder): {asset.FullPath} → copied .mdl, .vvd, {ext}");
-            }
-            else
-            {
-                Log($"  FAIL: {asset.FullPath} (MDL not found)");
-                return;
-            }
+            Directory.CreateDirectory(modelDir);
+            File.WriteAllBytes(outputPath, mdlData);
+            if (vvdData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
+            if (vtxData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
+            if (phyData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.phy"), phyData);
+            Log($"  RAW (FBX Placeholder): {asset.FullPath} → copied .mdl + companions");
         }
         else if (_options.ModelExportFormat == ModelFormat.Gltf)
         {
             if (!model.IsValid)
             {
-                if (mdlData != null)
-                {
-                    string rawOutput = GetOutputPath(basePath);
-                    Directory.CreateDirectory(Path.GetDirectoryName(rawOutput)!);
-                    File.WriteAllBytes(rawOutput, mdlData);
-                    Log($"  RAW: {asset.FullPath} (missing VVD/VTX for conversion)");
-                }
-                return;
+                Directory.CreateDirectory(modelDir);
+                File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
+                Log($"  RAW: {asset.FullPath} (missing valid VVD/VTX for conversion)");
             }
-
-            if (GltfConverter.ExportGltf(model, modelDir, modelName))
+            else if (GltfConverter.ExportGltf(model, modelDir, modelName))
             {
                 Log($"  OK: {asset.FullPath} → {modelName}.gltf");
-                if (_options.KeepMdlFile && mdlData != null)
+                if (_options.KeepMdlFile)
                 {
                     File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
-                    if (vvdData != null)
-                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
-                    if (vtxData != null)
-                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
-                    Log($"  KEEP: Saved original {modelName}.mdl" +
-                        (vvdData != null ? " + .vvd" : "") +
-                        (vtxData != null ? " + .vtx" : ""));
+                    if (vvdData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
+                    if (vtxData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
+                    if (phyData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.phy"), phyData);
                 }
             }
             else
@@ -534,64 +589,47 @@ public class ExtractionPipeline
         {
             if (!model.IsValid)
             {
-                if (mdlData != null)
-                {
-                    string rawOutput = GetOutputPath(basePath);
-                    Directory.CreateDirectory(Path.GetDirectoryName(rawOutput)!);
-                    File.WriteAllBytes(rawOutput, mdlData);
-                    Log($"  RAW: {asset.FullPath} (missing VVD/VTX for conversion)");
-                }
-                return;
-            }
-
-            string glbOutput = Path.Combine(modelDir, $"{modelName}.glb");
-            if (GltfConverter.ExportGlb(model, glbOutput))
-            {
-                Log($"  OK: {asset.FullPath} → {modelName}.glb");
-                if (_options.KeepMdlFile && mdlData != null)
-                {
-                    File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
-                    if (vvdData != null)
-                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
-                    if (vtxData != null)
-                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
-                    Log($"  KEEP: Saved original {modelName}.mdl" +
-                        (vvdData != null ? " + .vvd" : "") +
-                        (vtxData != null ? " + .vtx" : ""));
-                }
+                Directory.CreateDirectory(modelDir);
+                File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
+                Log($"  RAW: {asset.FullPath} (missing valid VVD/VTX for conversion)");
             }
             else
             {
-                Log($"  FAIL: {asset.FullPath} (GLB export error)");
+                string glbOutput = Path.Combine(modelDir, $"{modelName}.glb");
+                if (GltfConverter.ExportGlb(model, glbOutput))
+                {
+                    Log($"  OK: {asset.FullPath} → {modelName}.glb");
+                    if (_options.KeepMdlFile)
+                    {
+                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
+                        if (vvdData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
+                        if (vtxData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
+                        if (phyData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.phy"), phyData);
+                    }
+                }
+                else
+                {
+                    Log($"  FAIL: {asset.FullPath} (GLB export error)");
+                }
             }
         }
-        else
+        else // ModelFormat.Obj default
         {
             if (!model.IsValid)
             {
-                if (mdlData != null)
-                {
-                    string rawOutput = GetOutputPath(basePath);
-                    Directory.CreateDirectory(Path.GetDirectoryName(rawOutput)!);
-                    File.WriteAllBytes(rawOutput, mdlData);
-                    Log($"  RAW: {asset.FullPath} (missing VVD/VTX for conversion)");
-                }
-                return;
+                Directory.CreateDirectory(modelDir);
+                File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
+                Log($"  RAW: {asset.FullPath} (missing valid VVD/VTX for conversion)");
             }
-
-            if (ModelConverter.ExportObj(model, modelDir, modelName))
+            else if (ModelConverter.ExportObj(model, modelDir, modelName))
             {
                 Log($"  OK: {asset.FullPath} → {modelName}.obj");
-                if (_options.KeepMdlFile && mdlData != null)
+                if (_options.KeepMdlFile)
                 {
                     File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.mdl"), mdlData);
-                    if (vvdData != null)
-                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
-                    if (vtxData != null)
-                        File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
-                    Log($"  KEEP: Saved original {modelName}.mdl" +
-                        (vvdData != null ? " + .vvd" : "") +
-                        (vtxData != null ? " + .vtx" : ""));
+                    if (vvdData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vvd"), vvdData);
+                    if (vtxData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.vtx"), vtxData);
+                    if (phyData != null) File.WriteAllBytes(Path.Combine(modelDir, $"{modelName}.phy"), phyData);
                 }
             }
             else
@@ -600,35 +638,51 @@ public class ExtractionPipeline
             }
         }
 
-        if (!model.IsValid) return;
+        // Extract Model Materials even if model.IsValid is false
+        var matRefNames = model.IsValid ? model.MaterialNames : null;
+        var matRefPaths = model.IsValid ? model.MaterialPaths : null;
 
-        // Extract Model Materials
-        foreach (string matName in model.MaterialNames)
+        if (matRefNames == null || matRefNames.Count == 0)
+        {
+            var refs = MdlReader.GetMaterialReferences(mdlData);
+            matRefNames = refs.Names;
+            matRefPaths = refs.Paths;
+        }
+
+        ExtractModelMaterials(matRefNames, matRefPaths, ct);
+    }
+
+    private void ExtractModelMaterials(List<string>? matNames, List<string>? matPaths, CancellationToken ct)
+    {
+        if (matNames == null || matNames.Count == 0) return;
+        matPaths ??= new List<string>();
+
+        foreach (string matName in matNames)
         {
             bool found = false;
-            foreach (string matPath in model.MaterialPaths)
+            foreach (string matPath in matPaths)
             {
                 string fullMatPath = Path.Combine(matPath, matName).Replace('\\', '/');
                 if (!fullMatPath.EndsWith(".vmt", StringComparison.OrdinalIgnoreCase))
                     fullMatPath += ".vmt";
-                
                 if (!fullMatPath.StartsWith("materials/", StringComparison.OrdinalIgnoreCase))
-                     fullMatPath = $"materials/{fullMatPath}";
+                    fullMatPath = $"materials/{fullMatPath}";
 
-                // Try to resolve
                 if (GetAssetData(fullMatPath) != null)
                 {
-                    await Task.Run(() => ExtractMaterial(new AssetInfo { FullPath = fullMatPath, Type = AssetType.Material }, ct), ct);
+                    ExtractMaterial(new AssetInfo { FullPath = fullMatPath, Type = AssetType.Material }, ct);
                     found = true;
                     break;
                 }
             }
+
             if (!found)
             {
-                // Try literal path in materials root
-                 string fallbackPath = $"materials/{matName}.vmt";
-                 if (GetAssetData(fallbackPath) != null)
-                     await Task.Run(() => ExtractMaterial(new AssetInfo { FullPath = fallbackPath, Type = AssetType.Material }, ct), ct);
+                string fallbackPath = $"materials/{matName}.vmt";
+                if (GetAssetData(fallbackPath) != null)
+                {
+                    ExtractMaterial(new AssetInfo { FullPath = fallbackPath, Type = AssetType.Material }, ct);
+                }
             }
         }
     }
@@ -637,19 +691,15 @@ public class ExtractionPipeline
     {
         string skyboxName;
 
-        // Determine skybox name from asset or map
         if (asset.Type == AssetType.Skybox && asset.Source == AssetSource.BspPakfile && !asset.FullPath.Contains("skybox"))
         {
-             // Fallback for metadata-only skybox entries (if any)
-             skyboxName = _bsp?.GetSkyboxName() ?? "";
+            skyboxName = _bsp?.GetSkyboxName() ?? "";
         }
         else
         {
-            // Try to guess from filename (e.g., sky_day01_01up.vtf -> sky_day01_01)
             string fileName = Path.GetFileNameWithoutExtension(asset.FullPath);
             skyboxName = fileName;
-            
-            // Check suffixes
+
             foreach (var suffix in SkyboxConverter.FaceSuffixes)
             {
                 if (fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
@@ -662,16 +712,10 @@ public class ExtractionPipeline
 
         if (string.IsNullOrEmpty(skyboxName)) return;
 
-        string skyDir = Path.Combine(_options.OutputDirectory, "skybox");
-        string texExt = TextureConverter.GetExtension(_options.TextureOutputFormat);
-        string indicatorPath = Path.Combine(skyDir, $"{skyboxName}_ft{texExt}");
-        
-        if (!_extractedFiles.TryAdd((skyboxName + "_skybox").ToLowerInvariant(), true)) return;
+        string skyDir = Path.Combine(_options.OutputDirectory, "materials", "skybox");
+        bool isOriginal = _options.ExtractOriginalAssets || _options.TextureOutputFormat == TextureFormat.Original;
 
-        if (_options.SkipExistingFiles && File.Exists(indicatorPath)) {
-            Log($"  SKIP: Skybox {skyboxName} (already exists on disk)");
-            return;
-        }
+        if (!_extractedFiles.TryAdd((skyboxName + "_skybox").ToLowerInvariant(), true)) return;
 
         var faceData = new Dictionary<string, byte[]>();
         foreach (string suffix in SkyboxConverter.FaceSuffixes)
@@ -679,9 +723,29 @@ public class ExtractionPipeline
             string facePath = $"materials/skybox/{skyboxName}{suffix}.vtf";
             byte[]? data = GetAssetData(facePath);
             if (data != null) faceData[suffix] = data;
+
+            // Also check for corresponding .vmt
+            string vmtPath = $"materials/skybox/{skyboxName}{suffix}.vmt";
+            byte[]? vmtData = GetAssetData(vmtPath);
+            if (vmtData != null && isOriginal)
+            {
+                Directory.CreateDirectory(skyDir);
+                File.WriteAllBytes(Path.Combine(skyDir, $"{skyboxName}{suffix}.vmt"), vmtData);
+            }
         }
 
         if (faceData.Count == 0) return;
+
+        if (isOriginal)
+        {
+            Directory.CreateDirectory(skyDir);
+            foreach (var kvp in faceData)
+            {
+                File.WriteAllBytes(Path.Combine(skyDir, $"{skyboxName}{kvp.Key}.vtf"), kvp.Value);
+            }
+            Log($"  OK: Skybox '{skyboxName}' — original VTF faces extracted ({faceData.Count} faces)");
+            return;
+        }
 
         int converted = SkyboxConverter.ConvertFaces(skyboxName, faceData, skyDir, _options.TextureOutputFormat);
         Log($"  OK: Skybox '{skyboxName}' — {converted}/{SkyboxConverter.FaceSuffixes.Length} faces");
@@ -697,23 +761,28 @@ public class ExtractionPipeline
     private void ExtractRaw(AssetInfo asset)
     {
         string outputPath = GetOutputPath(asset.FullPath);
-
         if (!_extractedFiles.TryAdd(outputPath.ToLowerInvariant(), true)) return;
 
-        if (_options.SkipExistingFiles && File.Exists(outputPath)) {
+        if (_options.SkipExistingFiles && File.Exists(outputPath))
+        {
             Log($"  SKIP: {asset.FullPath} (already exists on disk)");
             return;
         }
 
         byte[]? data = GetAssetData(asset.FullPath);
-        if (data == null) return;
+        if (data == null)
+        {
+            Log($"  SKIP: {asset.FullPath} (not found)");
+            return;
+        }
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         File.WriteAllBytes(outputPath, data);
+        Log($"  OK: {asset.FullPath} → {Path.GetFileName(outputPath)}");
     }
 
     /// <summary>
-    /// Resolve asset data from pakfile or VPK.
+    /// Resolve asset data from pakfile, GMA, disk (BSP folder), custom directories, or VPKs.
     /// </summary>
     public byte[]? GetAssetData(string path)
     {
@@ -721,103 +790,193 @@ public class ExtractionPipeline
     }
 
     /// <summary>
-    /// Resolve asset data from pakfile or VPK and get its source description.
+    /// Resolve asset data and identify its source description.
     /// </summary>
     public byte[]? GetAssetData(string path, out string sourceDescription)
     {
         sourceDescription = string.Empty;
-        path = path.Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(path)) return null;
 
-        // Check BSP pakfile first
-        if (_pakFiles.TryGetValue(path, out byte[]? pakData))
+        string normPath = path.Replace('\\', '/').Trim().TrimStart('/');
+
+        // Build list of potential relative paths to check
+        var candidates = new List<string> { normPath };
+
+        // Alternative prefixes
+        if (normPath.EndsWith(".vtf", StringComparison.OrdinalIgnoreCase) || normPath.EndsWith(".vmt", StringComparison.OrdinalIgnoreCase))
         {
-            sourceDescription = "BSP Pakfile";
-            return pakData;
+            if (!normPath.StartsWith("materials/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"materials/{normPath}");
+            else
+                candidates.Add(normPath.Substring(10));
+        }
+        else if (normPath.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".vvd", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.Contains(".vtx", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".phy", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".ani", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!normPath.StartsWith("models/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"models/{normPath}");
+            else
+                candidates.Add(normPath.Substring(7));
+        }
+        else if (normPath.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!normPath.StartsWith("sound/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"sound/{normPath}");
+            else
+                candidates.Add(normPath.Substring(6));
+        }
+        else if (normPath.EndsWith(".nav", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".ain", StringComparison.OrdinalIgnoreCase) ||
+                 normPath.EndsWith(".bsp", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!normPath.StartsWith("maps/", StringComparison.OrdinalIgnoreCase))
+                candidates.Add($"maps/{normPath}");
+            else
+                candidates.Add(normPath.Substring(5));
         }
 
-        // Try case-insensitive match
-        var match = _pakFiles.Keys.FirstOrDefault(k =>
-            k.Equals(path, StringComparison.OrdinalIgnoreCase));
-        if (match != null)
+        foreach (var cand in candidates)
         {
-            sourceDescription = "BSP Pakfile";
-            return _pakFiles[match];
-        }
-
-        // Check GMA files
-        if (_gmaFiles.TryGetValue(path, out byte[]? gmaData))
-        {
-            sourceDescription = "GMA Archive";
-            return gmaData;
-        }
-
-        // Try case-insensitive GMA match
-        var gmaMatch = _gmaFiles.Keys.FirstOrDefault(k =>
-            k.Equals(path, StringComparison.OrdinalIgnoreCase));
-        if (gmaMatch != null)
-        {
-            sourceDescription = "GMA Archive";
-            return _gmaFiles[gmaMatch];
-        }
-
-        // Check custom explicitly loaded directories (loose files)
-        foreach (var dir in _customDirectories)
-        {
-            try
+            // 1. Check BSP pakfile
+            if (_pakFiles.TryGetValue(cand, out byte[]? pakData))
             {
-                // Source paths might be 'materials/skybox/sky.vtf', so we combine dir + path
-                string fullPath = Path.Combine(dir, path).Replace('\\', '/');
-                if (File.Exists(fullPath))
-                {
-                    sourceDescription = $"Custom Folder ({dir})";
-                    return File.ReadAllBytes(fullPath);
-                }
-                
-                // FALLBACK: Search by filename only in the custom directory tree
-                // This handles the common case where users drop VVD/VTX files
-                // directly into a folder without preserving the models/ subdirectory
-                string fileName = Path.GetFileName(path);
-                if (!string.IsNullOrEmpty(fileName))
-                {
-                    try
-                    {
-                        var found = Directory.GetFiles(dir, fileName, SearchOption.AllDirectories);
-                        if (found.Length > 0)
-                        {
-                            sourceDescription = $"Custom Folder ({dir}) [filename match]";
-                            return File.ReadAllBytes(found[0]);
-                        }
-                    }
-                    catch { }
-                }
+                sourceDescription = "BSP Pakfile";
+                return pakData;
             }
-            catch { }
-        }
 
-        // Check VPKs — ALWAYS check for model companion files (.vvd, .vtx)
-        // even when ExtractGameDependencies is off, because models are useless without them
-        bool isCompanionFile = path.EndsWith(".vvd", StringComparison.OrdinalIgnoreCase) ||
-                               path.EndsWith(".vtx", StringComparison.OrdinalIgnoreCase) ||
-                               path.EndsWith(".dx90.vtx", StringComparison.OrdinalIgnoreCase) ||
-                               path.EndsWith(".dx80.vtx", StringComparison.OrdinalIgnoreCase) ||
-                               path.EndsWith(".sw.vtx", StringComparison.OrdinalIgnoreCase);
-
-        if (_options.ExtractGameDependencies || isCompanionFile)
-        {
-            foreach (var vpk in _vpks)
+            // 2. Check in-memory GMA files
+            if (_gmaFiles.TryGetValue(cand, out byte[]? gmaData))
             {
-                var entry = vpk.FindEntry(path);
+                sourceDescription = "GMA Archive";
+                return gmaData;
+            }
+
+            // 3. Check mounted streaming GMAs (O(1) lookup per GMA)
+            foreach (var gma in _gmas)
+            {
+                var entry = gma.FindEntry(cand);
                 if (entry != null)
                 {
-                    sourceDescription = $"VPK: {Path.GetFileName(vpk.FilePath)}";
-                    return vpk.ExtractEntry(entry);
+                    byte[]? data = gma.ExtractEntry(entry);
+                    if (data != null)
+                    {
+                        sourceDescription = $"GMA: {gma.AddonName}";
+                        return data;
+                    }
+                }
+            }
+
+            // 4. Check BSP folder on disk (crucial for .nav, .ain, loose map textures)
+            if (!string.IsNullOrEmpty(_bspPath) && File.Exists(_bspPath))
+            {
+                try
+                {
+                    string bspDir = Path.GetDirectoryName(_bspPath)!;
+                    string diskPath = cand.Replace('/', '\\');
+
+                    // Check bspDir + cand
+                    string directPath = Path.Combine(bspDir, diskPath);
+                    if (File.Exists(directPath))
+                    {
+                        sourceDescription = $"Map Folder ({bspDir})";
+                        return File.ReadAllBytes(directPath);
+                    }
+
+                    // Check filename only in bspDir
+                    string fileName = Path.GetFileName(cand);
+                    string localFile = Path.Combine(bspDir, fileName);
+                    if (File.Exists(localFile))
+                    {
+                        sourceDescription = $"Map Folder ({bspDir})";
+                        return File.ReadAllBytes(localFile);
+                    }
+
+                    // Check parent dir if bspDir is "maps"
+                    string parentDir = Directory.GetParent(bspDir)?.FullName ?? "";
+                    if (!string.IsNullOrEmpty(parentDir))
+                    {
+                        string parentCombined = Path.Combine(parentDir, diskPath);
+                        if (File.Exists(parentCombined))
+                        {
+                            sourceDescription = $"Map Parent Folder ({parentDir})";
+                            return File.ReadAllBytes(parentCombined);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 5. Check explicitly loaded custom directories
+            foreach (var dir in _customDirectories)
+            {
+                try
+                {
+                    string diskPath = cand.Replace('/', '\\');
+                    string fullPath = Path.Combine(dir, diskPath);
+                    if (File.Exists(fullPath))
+                    {
+                        sourceDescription = $"Custom Folder ({dir})";
+                        return File.ReadAllBytes(fullPath);
+                    }
+
+                    // Also check filename directly in custom dir
+                    string fileName = Path.GetFileName(cand);
+                    string localFile = Path.Combine(dir, fileName);
+                    if (File.Exists(localFile))
+                    {
+                        sourceDescription = $"Custom Folder ({dir})";
+                        return File.ReadAllBytes(localFile);
+                    }
+                }
+                catch { }
+            }
+
+            // 6. Check mounted VPKs
+            bool isCompanionFile = cand.EndsWith(".vvd", StringComparison.OrdinalIgnoreCase) ||
+                                   cand.EndsWith(".vtx", StringComparison.OrdinalIgnoreCase) ||
+                                   cand.EndsWith(".phy", StringComparison.OrdinalIgnoreCase) ||
+                                   cand.EndsWith(".ani", StringComparison.OrdinalIgnoreCase);
+
+            if (_options.ExtractGameDependencies || isCompanionFile)
+            {
+                foreach (var vpk in _vpks)
+                {
+                    var entry = vpk.FindEntry(cand);
+                    if (entry != null)
+                    {
+                        sourceDescription = $"VPK: {Path.GetFileName(vpk.FilePath)}";
+                        return vpk.ExtractEntry(entry);
+                    }
                 }
             }
         }
 
-        // Log exactly what we checked for debugging
-        string checkedSources = $"pakfile({_pakFiles.Count}), GMA({_gmaFiles.Count}), custom_dirs({_customDirectories.Count}), VPKs({_vpks.Count})";
-        LogSystem($"  Could not find asset: {path} (Checked: {checkedSources})");
+        // Fallback: search custom directory tree by filename
+        string targetFileName = Path.GetFileName(normPath);
+        if (!string.IsNullOrEmpty(targetFileName))
+        {
+            foreach (var dir in _customDirectories)
+            {
+                try
+                {
+                    var found = Directory.GetFiles(dir, targetFileName, SearchOption.AllDirectories);
+                    if (found.Length > 0)
+                    {
+                        sourceDescription = $"Custom Folder ({dir}) [filename match]";
+                        return File.ReadAllBytes(found[0]);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        string checkedSources = $"pakfile({_pakFiles.Count}), GMAs({_gmas.Count}+{_gmaFiles.Count}), custom_dirs({_customDirectories.Count}), VPKs({_vpks.Count})";
+        LogSystem($"  Could not find asset: {normPath} (Checked: {checkedSources})");
         return null;
     }
 
@@ -845,13 +1004,15 @@ public class ExtractionPipeline
         });
     }
 
-    private void Log(string message)
-    {
-        LogMessage?.Invoke(this, message);
-    }
+    private void Log(string message) => LogMessage?.Invoke(this, message);
+    private void LogSystem(string message) => SystemMessage?.Invoke(this, message);
 
-    private void LogSystem(string message)
+    public void Dispose()
     {
-        SystemMessage?.Invoke(this, message);
+        _bsp?.Dispose();
+        _bsp = null;
+        ClearVpks();
+        foreach (var gma in _gmas) gma.Dispose();
+        _gmas.Clear();
     }
 }

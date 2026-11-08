@@ -18,6 +18,30 @@ public class SteamCmdService : IDisposable
         _customPath = path;
     }
 
+    /// <summary>
+    /// Gets the SteamCMD workshop content directory if it exists on disk.
+    /// </summary>
+    public static string? FindWorkshopContentDirectory(string? customPath = null)
+    {
+        string? exePath = customPath;
+        if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+        {
+            string appRoot = AppDomain.CurrentDomain.BaseDirectory;
+            string subPath = Path.Combine(appRoot, "steamcmd", "steamcmd.exe");
+            string localPath = Path.Combine(appRoot, "steamcmd.exe");
+
+            if (File.Exists(subPath)) exePath = subPath;
+            else if (File.Exists(localPath)) exePath = localPath;
+        }
+
+        if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+            return null;
+
+        string rootDir = Path.GetDirectoryName(exePath) ?? "";
+        string contentDir = Path.Combine(rootDir, "steamapps", "workshop", "content");
+        return Directory.Exists(contentDir) ? contentDir : null;
+    }
+
     private string FindExePath()
     {
         string? exePath = _customPath;

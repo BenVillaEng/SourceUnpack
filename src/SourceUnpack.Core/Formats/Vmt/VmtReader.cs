@@ -72,8 +72,14 @@ public class VmtReader
                 case "$basetexture":
                     info.BaseTexture = NormalizePath(value);
                     break;
+                case "$basetexture2":
+                    info.BaseTexture2 = NormalizePath(value);
+                    break;
                 case "$bumpmap":
                     info.BumpMap = NormalizePath(value);
+                    break;
+                case "$bumpmap2":
+                    info.BumpMap2 = NormalizePath(value);
                     break;
                 case "$normalmap":
                     info.NormalMap = NormalizePath(value);
@@ -87,8 +93,32 @@ public class VmtReader
                 case "$detail":
                     info.DetailTexture = NormalizePath(value);
                     break;
+                case "$blendmodulatetexture":
+                    info.BlendModulateTexture = NormalizePath(value);
+                    break;
+                case "$lightwarptexture":
+                    info.LightwarpTexture = NormalizePath(value);
+                    break;
                 case "$selfillummask":
                     info.SelfIllumMask = NormalizePath(value);
+                    break;
+                case "$selfillumtexture":
+                    info.SelfIllumTexture = NormalizePath(value);
+                    break;
+                case "$ambientoccltexture":
+                    info.AmbientOcclTexture = NormalizePath(value);
+                    break;
+                case "$refracttexture":
+                    info.RefractTexture = NormalizePath(value);
+                    break;
+                case "$dudvmap":
+                    info.DuDvMap = NormalizePath(value);
+                    break;
+                case "$masks1":
+                    info.Masks1 = NormalizePath(value);
+                    break;
+                case "$masks2":
+                    info.Masks2 = NormalizePath(value);
                     break;
                 case "include":
                     info.Include = NormalizePath(value);

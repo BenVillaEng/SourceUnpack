@@ -53,6 +53,93 @@ public class MdlModelData
 public class MdlReader
 {
     /// <summary>
+    /// Reads material names and texture directories directly from MDL file bytes,
+    /// even if VVD or VTX companion files are unavailable.
+    /// </summary>
+    public static (List<string> Names, List<string> Paths) GetMaterialReferences(byte[] mdlData)
+    {
+        var names = new List<string>();
+        var paths = new List<string>();
+
+        if (mdlData == null || mdlData.Length < 408) return (names, paths);
+
+        try
+        {
+            using var ms = new MemoryStream(mdlData);
+            using var br = new BinaryReader(ms);
+
+            int magic = br.ReadInt32();
+            if (magic != 0x54534449) return (names, paths); // "IDST"
+
+            int version = br.ReadInt32();
+            if (version < 44 || version > 53) return (names, paths);
+
+            br.ReadInt32(); // Checksum
+            ms.Seek(64, SeekOrigin.Current); // Name
+            br.ReadInt32(); // Data length
+            ms.Seek(76, SeekOrigin.Current); // Bounding / flags
+
+            // Skip bones, controllers, hitboxes, anims, seqs (12 ints * 4 = 48 bytes)
+            ms.Seek(48, SeekOrigin.Current);
+
+            // Textures
+            int numTextures = br.ReadInt32();
+            int textureOffset = br.ReadInt32();
+
+            // Texture directories
+            int numCdTextures = br.ReadInt32();
+            int cdTextureOffset = br.ReadInt32();
+
+            // Read texture names
+            if (textureOffset > 0 && numTextures > 0)
+            {
+                for (int i = 0; i < numTextures && i < 256; i++)
+                {
+                    long entryPos = textureOffset + i * 64;
+                    if (entryPos + 4 > mdlData.Length) break;
+
+                    ms.Seek(entryPos, SeekOrigin.Begin);
+                    int nameOfs = br.ReadInt32();
+
+                    long namePos = entryPos + nameOfs;
+                    if (namePos > 0 && namePos < mdlData.Length)
+                    {
+                        ms.Seek(namePos, SeekOrigin.Begin);
+                        string texName = ReadNullTermString(br, mdlData.Length - (int)namePos);
+                        if (!string.IsNullOrWhiteSpace(texName))
+                            names.Add(texName);
+                    }
+                }
+            }
+
+            // Read texture paths
+            if (cdTextureOffset > 0 && numCdTextures > 0)
+            {
+                ms.Seek(cdTextureOffset, SeekOrigin.Begin);
+                for (int i = 0; i < numCdTextures && i < 64; i++)
+                {
+                    if (ms.Position + 4 > mdlData.Length) break;
+                    int pathOfs = br.ReadInt32();
+                    long savedPos = ms.Position;
+
+                    long pathPos = pathOfs;
+                    if (pathPos > 0 && pathPos < mdlData.Length)
+                    {
+                        ms.Seek(pathPos, SeekOrigin.Begin);
+                        string texPath = ReadNullTermString(br, mdlData.Length - (int)pathPos);
+                        if (!string.IsNullOrWhiteSpace(texPath))
+                            paths.Add(texPath.Replace('\\', '/'));
+                    }
+                    ms.Seek(savedPos, SeekOrigin.Begin);
+                }
+            }
+        }
+        catch { }
+
+        return (names.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+    }
+    /// <summary>
     /// Load model data from MDL, VVD, and VTX file byte arrays.
     /// </summary>
     public MdlModelData Load(byte[] mdlData, byte[] vvdData, byte[] vtxData)
